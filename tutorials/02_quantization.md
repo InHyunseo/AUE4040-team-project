@@ -3,7 +3,7 @@
 **Author**: Hyun-seo In (Hanyang Univ. BME/AE) — <inhsroy@hanyang.ac.kr>
 **Date**: 2026.05
 
-실습 코드는 [02_yolo_quantization.ipynb](02_yolo_quantization.ipynb) 참조. 이 문서는 개념과 주의사항만 정리.
+실습 코드는 [practice.ipynb](pratice.ipynb) 참조. 이 문서는 개념과 주의사항만 정리.
 
 ---
 
