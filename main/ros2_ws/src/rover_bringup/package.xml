@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rover_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files and shared configuration for the rover stack.</description>
+  <maintainer email="inhsroy@hanyang.ac.kr">team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rover_msgs</exec_depend>
+  <exec_depend>rover_perception</exec_depend>
+  <exec_depend>rover_pilotnet</exec_depend>
+  <exec_depend>rover_decision</exec_depend>
+  <exec_depend>rover_control</exec_depend>
+  <exec_depend>rover_recorder</exec_depend>
+  <exec_depend>rover_stereo</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

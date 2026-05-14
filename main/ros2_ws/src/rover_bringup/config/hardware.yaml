@@ -1,0 +1,23 @@
+# Ported from HYU-ECL3003/rover/config.yaml. Keep UART command codes in sync
+# with the firmware running on the UGV Rover base controller.
+
+base_config:
+  robot_name: "UGV Rover"
+  uart_dev: "/dev/ttyUSB0"
+  baudrate: 115200
+  use_lidar: false
+  extra_sensor: false
+
+cmd_config:
+  cmd_movition_ctrl: 1
+  cmd_pwm_ctrl: 11
+  cmd_gimbal_ctrl: 133
+  cmd_gimbal_base_ctrl: 141
+  cmd_set_servo_id: 501
+  cmd_set_servo_mid: 502
+  cmd_servo_torque: 210
+
+# Motor sign convention (BaseController quirk, see PROJECT_PLAN §9.5):
+#   forward motion requires negative L and R in base_speed_ctrl().
+motor:
+  invert_drive: true

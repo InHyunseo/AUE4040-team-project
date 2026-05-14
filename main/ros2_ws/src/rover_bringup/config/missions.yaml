@@ -1,0 +1,9 @@
+missions:
+  left:
+    active_model_common: "common"
+    active_model_turning: "left"
+    description: "Goal A through the left exit of the roundabout."
+  right:
+    active_model_common: "common"
+    active_model_turning: "right"
+    description: "Goal B through the right exit of the roundabout."
