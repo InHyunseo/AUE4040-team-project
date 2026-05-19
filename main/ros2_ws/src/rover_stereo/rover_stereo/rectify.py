@@ -50,7 +50,9 @@ class StereoCalib:
 
 class StereoRectifier:
     def __init__(self, calib: StereoCalib, alpha: float = 0.0):
-        # alpha=0 -> tight crop (no black borders), alpha=1 -> keep all pixels.
+        # alpha=0 keeps fx well-conditioned. Wide-FOV (160° IMX219)
+        # calibrations can still make stereoRectify return a degenerate
+        # right-camera roi — we fall back to the full image in that case.
         self.calib = calib
         W, H = calib.image_size
         (calib.R1, calib.R2, calib.P1, calib.P2, calib.Q,
@@ -64,13 +66,16 @@ class StereoRectifier:
         self.map2x, self.map2y = cv2.initUndistortRectifyMap(
             calib.K2, calib.D2, calib.R2, calib.P2, (W, H), cv2.CV_16SC2,
         )
-        # Conservative shared ROI: intersection of left/right valid regions.
         x1, y1, w1, h1 = calib.roi1
         x2, y2, w2, h2 = calib.roi2
         xa, ya = max(x1, x2), max(y1, y2)
         xb = min(x1 + w1, x2 + w2)
         yb = min(y1 + h1, y2 + h2)
-        self.shared_roi = (xa, ya, xb - xa, yb - ya)
+        roi_w, roi_h = xb - xa, yb - ya
+        if roi_w <= 0 or roi_h <= 0:
+            self.shared_roi = (0, 0, W, H)
+        else:
+            self.shared_roi = (xa, ya, roi_w, roi_h)
 
     def rectify_pair(self, left_bgr: np.ndarray, right_bgr: np.ndarray):
         lr = cv2.remap(left_bgr, self.map1x, self.map1y, cv2.INTER_LINEAR)
