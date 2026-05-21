@@ -1,24 +1,25 @@
 """
-Stereo node.
+Stereo rectify node.
 
 Subscribes: /camera/left/image_raw, /camera/right/image_raw (sensor_msgs/Image)
 Publishes:  /image_rectified  (sensor_msgs/Image)  — left rectified, ROI-cropped
-            /vehicle_distance (std_msgs/Float32)   — meters; inf if no vehicle
 
 The rectified-left stream is the *single source of truth* for downstream
-nodes (yolo, pilotnet, recorder). They must not consume /camera/*/image_raw.
+nodes (yolo, lane, recorder). They must not consume /camera/*/image_raw.
+
+Distance to the vehicle is computed from its bbox height in rover_decision —
+NOT from disparity. We rectify the right image too (kept for future depth
+work) but discard it at this stage.
 """
 from pathlib import Path
 
-import cv2
 import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32
 
-from rover_stereo.rectify import StereoCalib, StereoRectifier, disparity_to_distance
+from rover_stereo.rectify import StereoCalib, StereoRectifier
 
 
 class StereoNode(Node):
@@ -27,23 +28,16 @@ class StereoNode(Node):
         self.declare_parameter("calib_path",
                                str(Path.home() / "team/main/ros2_ws/src/"
                                    "rover_stereo/config/stereo_calib.yaml"))
-        self.declare_parameter("baseline_m", 0.06)
         self.declare_parameter("sync_slop_s", 0.03)
 
         try:
             calib = StereoCalib.load(self.get_parameter("calib_path").value)
             self.rectifier = StereoRectifier(calib)
-            self.fx = float(calib.P1[0, 0]) if calib.P1 is not None else float(calib.K1[0, 0])
         except Exception as e:
             self.get_logger().warn(f"calibration not loaded: {e}")
             self.rectifier = None
-            self.fx = 0.0
-
-        # StereoBM is the cheapest matcher; tune block size + numDisparities in-situ.
-        self.matcher = cv2.StereoBM_create(numDisparities=64, blockSize=15)
 
         self.rect_pub = self.create_publisher(Image, "/image_rectified", 10)
-        self.dist_pub = self.create_publisher(Float32, "/vehicle_distance", 10)
 
         left_sub = Subscriber(self, Image, "/camera/left/image_raw")
         right_sub = Subscriber(self, Image, "/camera/right/image_raw")
@@ -72,29 +66,9 @@ class StereoNode(Node):
             return
         left = self._image_to_numpy(left_msg)
         right = self._image_to_numpy(right_msg)
-        lr, rr = self.rectifier.rectify_pair(left, right)
+        lr, _rr = self.rectifier.rectify_pair(left, right)
         lr_roi = self.rectifier.crop_to_roi(lr)
-        rr_roi = self.rectifier.crop_to_roi(rr)
-
         self.rect_pub.publish(self._numpy_to_image(lr_roi, left_msg.header))
-
-        # Distance: median disparity in a centered ROI around the assumed vehicle.
-        gray_l = cv2.cvtColor(lr_roi, cv2.COLOR_BGR2GRAY)
-        gray_r = cv2.cvtColor(rr_roi, cv2.COLOR_BGR2GRAY)
-        disp = self.matcher.compute(gray_l, gray_r).astype(np.float32) / 16.0
-        h, w = disp.shape
-        cy, cx = h // 2, w // 2
-        win = disp[cy - 40:cy + 40, cx - 60:cx + 60]
-        valid = win[win > 0.0]
-        if valid.size > 200:
-            dist = disparity_to_distance(
-                float(np.median(valid)),
-                self.fx,
-                self.get_parameter("baseline_m").value,
-            )
-        else:
-            dist = float("inf")
-        self.dist_pub.publish(Float32(data=float(dist)))
 
 
 def main():

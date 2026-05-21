@@ -1,7 +1,7 @@
 """Holds 3 CenterInference instances and selects active model by tag."""
 from typing import Dict
 
-from rover_pilotnet.center_inference import CenterInference
+from rover_lane.center_inference import CenterInference
 
 
 class ModelManager:

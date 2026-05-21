@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+from rover_msgs.msg import FSMState
 from rover_control.motor_driver import BaseController
 
 
@@ -53,8 +54,10 @@ class ControlNode(Node):
 
         self.fsm_state = "COMMON"
         self.create_subscription(Twist, "/cmd_vel", self.on_cmd_vel, 10)
-        # FSM state subscription wired once rover_msgs is built:
-        # self.create_subscription(FSMState, "/fsm_state", self.on_fsm, 10)
+        self.create_subscription(FSMState, "/fsm_state", self.on_fsm, 10)
+
+    def on_fsm(self, msg: FSMState) -> None:
+        self.fsm_state = msg.state
 
     def on_cmd_vel(self, msg: Twist) -> None:
         steering = float(msg.angular.z)

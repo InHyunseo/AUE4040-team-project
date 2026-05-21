@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = "rover_pilotnet"
+package_name = "rover_lane"
 
 setup(
     name=package_name,
@@ -19,7 +19,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            "pilotnet_node = rover_pilotnet.pilotnet_node:main",
+            "lane_node = rover_lane.lane_node:main",
         ],
     },
 )

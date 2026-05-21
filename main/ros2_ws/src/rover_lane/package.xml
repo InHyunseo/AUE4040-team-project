@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>rover_pilotnet</name>
+  <name>rover_lane</name>
   <version>0.1.0</version>
   <description>Road-center regression CNN node (3 models: common/left/right).</description>
   <maintainer email="inhsroy@hanyang.ac.kr">team</maintainer>

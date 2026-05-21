@@ -18,7 +18,7 @@ class FsmInputs:
     stop_sign_stable: bool = False
     red_light_stable: bool = False
     vehicle_close: bool = False
-    roundabout_trigger: bool = False
+    turn_sign_stable: bool = False
     lane_lost: bool = False
     green_light_seen: bool = False
     stop_timer_elapsed: bool = False
@@ -51,7 +51,7 @@ class Fsm:
             self.state = self.prev_state
 
         # Normal driving transitions.
-        if self.state == COMMON and inp.roundabout_trigger:
+        if self.state == COMMON and inp.turn_sign_stable:
             self.state = TURNING
         elif self.state == TURNING and inp.lane_lost:
             self.state = ARRIVED

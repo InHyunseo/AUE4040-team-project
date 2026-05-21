@@ -12,4 +12,4 @@ if [[ "$PREC" == "fp16" ]]; then
     ARGS+=("--fp16")
 fi
 
-trtexec "${ARGS[@]}"
+/usr/src/tensorrt/bin/trtexec "${ARGS[@]}"

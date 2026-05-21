@@ -1,13 +1,20 @@
 """
-Decision node — wires perception + pilotnet -> /cmd_vel + active model tag.
+Decision node — wires perception + lane -> /cmd_vel + active model tag.
 
-Subscribes: /detections, /road_center
-Publishes:  /cmd_vel, /active_model, /fsm_state
+Subscribes: /detections (rover_msgs/DetectionArray)
+            /road_center (rover_msgs/RoadCenter)
+Publishes:  /cmd_vel (geometry_msgs/Twist)
+            /active_model (std_msgs/String)
+            /fsm_state (rover_msgs/FSMState)
+
+Distance to the vehicle comes from its bbox height — see safety.vehicle_close.
 """
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32, String
+from std_msgs.msg import String
+
+from rover_msgs.msg import DetectionArray, RoadCenter, FSMState
 
 from rover_decision.fsm import Fsm, FsmInputs
 from rover_decision.safety import Stabilizer, vehicle_close
@@ -21,56 +28,86 @@ class DecisionNode(Node):
         self.declare_parameter("steering_gain_k", 1.2)
         self.declare_parameter("stable_frames_sign", 4)
         self.declare_parameter("stable_frames_light", 4)
-        self.declare_parameter("stable_frames_roundabout", 5)
+        self.declare_parameter("stable_frames_turn", 5)
         self.declare_parameter("safe_dist_m", 0.4)
-        self.declare_parameter("vehicle_dist_K", 180.0)   # fallback K (px*m)
+        self.declare_parameter("vehicle_dist_K", 180.0)   # K = bbox_h * d (px*m)
+        self.declare_parameter("det_score_min", 0.4)
 
-        self.fsm = Fsm(self.get_parameter("mission").value)
-        self.last_vehicle_dist_m = float("inf")
+        mission = self.get_parameter("mission").value
+        self.fsm = Fsm(mission)
         self.stab = Stabilizer({
             "stop_sign": self.get_parameter("stable_frames_sign").value,
             "traffic_light_red": self.get_parameter("stable_frames_light").value,
             "traffic_light_green": self.get_parameter("stable_frames_light").value,
-            "roundabout_sign": self.get_parameter("stable_frames_roundabout").value,
+            "turn_left_sign": self.get_parameter("stable_frames_turn").value,
+            "turn_right_sign": self.get_parameter("stable_frames_turn").value,
         })
+        self.last_dets: list = []
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.model_pub = self.create_publisher(String, "/active_model", 10)
-        self.create_subscription(Float32, "/vehicle_distance", self.on_vehicle_dist, 10)
-        # /detections + /road_center subscriptions wired after rover_msgs build.
+        self.fsm_pub = self.create_publisher(FSMState, "/fsm_state", 10)
+        self.create_subscription(DetectionArray, "/detections", self.on_detections, 10)
+        self.create_subscription(RoadCenter, "/road_center", self.on_road_center, 10)
 
-    def on_vehicle_dist(self, msg: Float32) -> None:
-        self.last_vehicle_dist_m = float(msg.data)
+    def on_detections(self, msg: DetectionArray) -> None:
+        self.last_dets = list(msg.detections)
 
-    # Placeholder tick — real version is driven by the /road_center callback.
-    def tick(self, x_center: float, present_classes: dict,
-             vehicle_bbox_h_px: float = 0.0) -> None:
-        stable = self.stab.update(present_classes)
-        safe_dist = self.get_parameter("safe_dist_m").value
-        v_close = self.last_vehicle_dist_m < safe_dist
-        if not v_close and vehicle_bbox_h_px > 0.0:
-            # Fallback when stereo distance is unavailable / inf.
-            v_close = vehicle_close(
-                vehicle_bbox_h_px,
-                self.get_parameter("vehicle_dist_K").value,
-                safe_dist,
-            )
+    def on_road_center(self, msg: RoadCenter) -> None:
+        score_min = float(self.get_parameter("det_score_min").value)
+
+        present = {}
+        vehicle_h_px = 0.0
+        for d in self.last_dets:
+            if d.score < score_min:
+                continue
+            present[d.class_name] = True
+            if d.class_name == "vehicle":
+                h = max(0.0, float(d.y2) - float(d.y1))
+                if h > vehicle_h_px:
+                    vehicle_h_px = h
+
+        stable = self.stab.update(present)
+
+        # Turn-sign trigger: only fires when the stable detection matches mission.
+        # If the wrong turn sign is stable we log + ignore.
+        mission = self.fsm.mission
+        want_class = f"turn_{mission}_sign"
+        other_class = "turn_right_sign" if mission == "left" else "turn_left_sign"
+        turn_stable = bool(stable.get(want_class, False))
+        if stable.get(other_class, False) and not turn_stable:
+            self.get_logger().warn(
+                f"saw {other_class} but mission={mission}; ignoring trigger")
+
+        v_close = vehicle_close(
+            vehicle_h_px,
+            self.get_parameter("vehicle_dist_K").value,
+            self.get_parameter("safe_dist_m").value,
+        )
+
         state = self.fsm.step(FsmInputs(
-            stop_sign_stable=stable.get("stop_sign", False),
-            red_light_stable=stable.get("traffic_light_red", False),
-            green_light_seen=stable.get("traffic_light_green", False),
-            roundabout_trigger=stable.get("roundabout_sign", False),
+            stop_sign_stable=bool(stable.get("stop_sign", False)),
+            red_light_stable=bool(stable.get("traffic_light_red", False)),
+            green_light_seen=bool(stable.get("traffic_light_green", False)),
+            turn_sign_stable=turn_stable,
             vehicle_close=v_close,
         ))
+
         steering = center_to_steering(
-            x_center, self.get_parameter("steering_gain_k").value,
+            float(msg.x), self.get_parameter("steering_gain_k").value,
         )
         twist = Twist()
-        twist.linear.x = 1.0   # placeholder — control_node scales to throttle
-        twist.angular.z = steering
+        twist.linear.x = 1.0   # control_node scales to throttle
+        twist.angular.z = float(steering)
         self.cmd_pub.publish(twist)
         self.model_pub.publish(String(data=self.fsm.active_model()))
-        self.get_logger().debug(f"state={state} steer={steering:.2f}")
+
+        fsm_msg = FSMState()
+        fsm_msg.header = msg.header
+        fsm_msg.state = state
+        fsm_msg.mission = mission
+        fsm_msg.active_model = self.fsm.active_model()
+        self.fsm_pub.publish(fsm_msg)
 
 
 def main():

@@ -17,7 +17,6 @@ scripts/
   export_to_trt.sh
 models/
   center_cnn.py                 # ResNet18-head (rover/cnn/center_dataset.py 호환)
-  pilotnet.py                   # NVIDIA PilotNet fallback
 notebooks/
   data_analysis.ipynb           # histogram / distribution checks
   label_centers.ipynb           # 수동 클릭 라벨링

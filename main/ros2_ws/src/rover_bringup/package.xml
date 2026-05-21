@@ -11,7 +11,7 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rover_msgs</exec_depend>
   <exec_depend>rover_perception</exec_depend>
-  <exec_depend>rover_pilotnet</exec_depend>
+  <exec_depend>rover_lane</exec_depend>
   <exec_depend>rover_decision</exec_depend>
   <exec_depend>rover_control</exec_depend>
   <exec_depend>rover_recorder</exec_depend>
