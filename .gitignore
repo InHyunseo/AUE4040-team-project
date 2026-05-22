@@ -8,7 +8,6 @@ data_cache
 *.h5
 *.csv
 *.zip
-*.tar.gz
 *.tar
 *.egg-info/
 dist/

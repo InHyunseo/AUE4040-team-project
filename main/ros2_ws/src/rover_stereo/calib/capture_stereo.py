@@ -13,9 +13,8 @@ from pathlib import Path
 import cv2
 import sys
 
-# jetcam from HYU-ECL3003. Copy or symlink the directory next to this script
-# if it isn't on PYTHONPATH yet.
-sys.path.insert(0, str(Path.home() / "HYU-ECL3003" / "rover"))
+# Vendored jetcam under team/calibration/camera/jetcam (carries sync=false fix).
+sys.path.insert(0, str(Path.home() / "team" / "calibration" / "camera"))
 from jetcam.csi_camera import CSICamera  # type: ignore  # noqa: E402
 
 

@@ -37,6 +37,7 @@
         - vehicle
         - turn_left_sign
         - turn_right_sign
+        - person_sign
 
     # ---- lane (center-regression) ----
     lane:

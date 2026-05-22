@@ -1,0 +1,8 @@
+traffic_light_red
+traffic_light_green
+traffic_light_yellow
+stop_sign
+vehicle
+turn_left_sign
+turn_right_sign
+person_sign

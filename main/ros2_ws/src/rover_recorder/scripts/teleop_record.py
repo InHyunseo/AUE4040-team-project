@@ -37,7 +37,8 @@ from pathlib import Path
 import cv2
 import serial
 
-sys.path.insert(0, str(Path.home() / "HYU-ECL3003" / "rover"))
+# Vendored jetcam under team/calibration/camera/jetcam (carries sync=false fix).
+sys.path.insert(0, str(Path.home() / "team" / "calibration" / "camera"))
 from jetcam.csi_camera import CSICamera  # noqa: E402
 
 

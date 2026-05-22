@@ -5,24 +5,18 @@ Provides the small surface that the rest of the calibration code expects:
     Camera(sensor_id) -> object with .read(), .read_gray(), .stop(),
                          .running(), .wait_ready()
 
-jetcam is sourced from /home/ircv16/HYU-ECL3003/rover/jetcam (same pattern
-used by team/main/ros2_ws/src/rover_stereo/calib/capture_stereo.py). To
-remove that dependency later, vendor the jetcam/ folder into this repo.
+jetcam is vendored into ./jetcam/ (originally from HYU-ECL3003/rover/jetcam).
+The local copy carries the `sync=false` appsink fix so the first read does
+not replay a backlog of buffered frames.
 """
 
 import atexit
-import os
-import sys
 import time
 
 import cv2
 import numpy as np
 
-_JETCAM_PARENT = "/home/ircv16/HYU-ECL3003/rover"
-if _JETCAM_PARENT not in sys.path:
-    sys.path.insert(0, _JETCAM_PARENT)
-
-from jetcam.csi_camera import CSICamera  # noqa: E402
+from .jetcam.csi_camera import CSICamera
 
 
 CAPTURE_WIDTH = 1280
