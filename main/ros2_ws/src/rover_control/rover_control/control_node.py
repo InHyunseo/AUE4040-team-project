@@ -1,7 +1,8 @@
 """
 Motor control node.
 
-Subscribes:  /cmd_vel (geometry_msgs/Twist) — linear.x = throttle, angular.z = steering
+Subscribes:  /cmd_vel (geometry_msgs/Twist) — linear.x = throttle in [-1,+1],
+                                              angular.z = steering in [-1,+1]
              /fsm_state (rover_msgs/FSMState) — gates throttle to 0 in STOPPED/WAITING/ARRIVED
 Publishes:   none (writes to motor over UART)
 """
@@ -29,18 +30,12 @@ def steer_speed_to_lr(steering: float, speed: float, max_steer: float, max_speed
     return L, R
 
 
-def compute_throttle(steering: float, target_speed: float, decel: float) -> float:
-    return target_speed * (1.0 - decel * abs(steering))
-
-
 class ControlNode(Node):
     def __init__(self):
         super().__init__("rover_control")
         self.declare_parameter("uart_dev", "/dev/ttyUSB0")
         self.declare_parameter("baudrate", 115200)
         self.declare_parameter("invert_drive", True)
-        self.declare_parameter("target_speed", 0.35)
-        self.declare_parameter("curvature_decel_factor", 0.6)
         self.declare_parameter("max_steer", 0.8)
         self.declare_parameter("max_speed", 0.5)
 
@@ -61,14 +56,7 @@ class ControlNode(Node):
 
     def on_cmd_vel(self, msg: Twist) -> None:
         steering = float(msg.angular.z)
-        if self.fsm_state in SAFE_STATES:
-            throttle = 0.0
-        else:
-            throttle = compute_throttle(
-                steering,
-                self.get_parameter("target_speed").value,
-                self.get_parameter("curvature_decel_factor").value,
-            )
+        throttle = 0.0 if self.fsm_state in SAFE_STATES else float(msg.linear.x)
         L, R = steer_speed_to_lr(
             steering,
             throttle,

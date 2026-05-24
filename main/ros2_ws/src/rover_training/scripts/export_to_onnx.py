@@ -1,4 +1,4 @@
-"""Export a trained center-regression CNN to ONNX."""
+"""Export the trained action-classification BC CNN (image + step) to ONNX."""
 import argparse
 import sys
 from pathlib import Path
@@ -18,11 +18,12 @@ def main():
 
     model = build_center_cnn(pretrained=False).eval()
     model.load_state_dict(torch.load(args.ckpt, map_location="cpu"))
-    dummy = torch.zeros(1, 3, args.size, args.size)
+    dummy_img = torch.zeros(1, 3, args.size, args.size)
+    dummy_step = torch.zeros(1, 1)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
-        model, dummy, str(args.out),
-        input_names=["input"], output_names=["center_xy"],
+        model, (dummy_img, dummy_step), str(args.out),
+        input_names=["image", "step"], output_names=["action_logits"],
         opset_version=17, dynamic_axes=None,
     )
     print(f"saved -> {args.out}")

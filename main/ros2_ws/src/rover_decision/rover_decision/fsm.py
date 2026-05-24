@@ -19,6 +19,7 @@ class FsmInputs:
     red_light_stable: bool = False
     vehicle_close: bool = False
     turn_sign_stable: bool = False
+    turn_sign_close: bool = False     # bbox big enough → reached the sign
     lane_lost: bool = False
     green_light_seen: bool = False
     stop_timer_elapsed: bool = False
@@ -51,8 +52,10 @@ class Fsm:
             self.state = self.prev_state
 
         # Normal driving transitions.
-        if self.state == COMMON and inp.turn_sign_stable:
-            self.state = TURNING
+        if self.state == COMMON and inp.turn_sign_stable and inp.turn_sign_close:
+            # Reached the turn sign: stop, swap model on resume.
+            self.prev_state = TURNING
+            self.state = STOPPED
         elif self.state == TURNING and inp.lane_lost:
             self.state = ARRIVED
         return self.state
