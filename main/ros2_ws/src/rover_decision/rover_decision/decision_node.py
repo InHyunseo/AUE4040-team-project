@@ -38,11 +38,16 @@ class DecisionNode(Node):
         self.declare_parameter("stop_duration_s", 2.0)
         # Person → SLOW duration
         self.declare_parameter("slow_duration_s", 3.0)
+        # Restrict which turn-signs may latch the mission. Use ["right"] when
+        # only the right model is trained/loaded so a stray left-sign detection
+        # doesn't latch an unusable mission.
+        self.declare_parameter("allowed_missions", ["left", "right"])
 
         # Class names follow best.pt training: car/green/left/person/red/right/stop.
         # Mission (left/right) is latched at runtime by the FSM from whichever
         # turn-sign first stabilizes — the course direction isn't known ahead.
-        self.fsm = Fsm()
+        allowed = tuple(self.get_parameter("allowed_missions").value)
+        self.fsm = Fsm(allowed_missions=allowed)
         self.stab = Stabilizer({
             "stop": self.get_parameter("stable_frames_sign").value,
             "red": self.get_parameter("stable_frames_light").value,

@@ -7,12 +7,14 @@ Inputs: stable-detection flags. Mission (left/right) is latched at runtime
 Outputs: next state + active-model tag.
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 COMMON, TURNING, SLOW, WAITING, STOPPED, ARRIVED = (
     "COMMON", "TURNING", "SLOW", "WAITING", "STOPPED", "ARRIVED",
 )
+
+ALL_MISSIONS: Tuple[str, ...] = ("left", "right")
 
 
 @dataclass
@@ -31,19 +33,23 @@ class FsmInputs:
 
 
 class Fsm:
-    def __init__(self):
+    def __init__(self, allowed_missions: Tuple[str, ...] = ALL_MISSIONS):
+        # Restrict which turn-signs can latch the mission. Set this to
+        # ("right",) when only the right-branch model is loaded so a stray
+        # left-sign detection doesn't latch an unusable mission.
+        self.allowed_missions = tuple(allowed_missions)
         self.mission: Optional[str] = None   # latched on first stable turn-sign
         self.state = COMMON
         self.prev_state = COMMON
 
     def step(self, inp: FsmInputs) -> str:
-        # Latch mission from first stable turn-sign observation. If both fire
-        # in the same tick (shouldn't happen with stabilizer thresholds), prefer
-        # whichever the perception layer reports — caller breaks ties.
+        # Latch mission from first stable turn-sign observation, restricted to
+        # allowed_missions. If both fire in the same tick (shouldn't happen
+        # with stabilizer thresholds), left wins per caller-side tiebreak.
         if self.mission is None:
-            if inp.left_sign_stable:
+            if inp.left_sign_stable and "left" in self.allowed_missions:
                 self.mission = "left"
-            elif inp.right_sign_stable:
+            elif inp.right_sign_stable and "right" in self.allowed_missions:
                 self.mission = "right"
 
         turn_sign_stable = (

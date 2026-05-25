@@ -1,0 +1,12 @@
+[0.000000] (-) TimerEvent: {}
+[0.000727] (-) JobUnselected: {'identifier': 'rover_bringup'}
+[0.001212] (-) JobUnselected: {'identifier': 'rover_control'}
+[0.001454] (-) JobUnselected: {'identifier': 'rover_decision'}
+[0.001720] (-) JobUnselected: {'identifier': 'rover_msgs'}
+[0.001817] (-) JobUnselected: {'identifier': 'rover_perception'}
+[0.001890] (-) JobUnselected: {'identifier': 'rover_recorder'}
+[0.001958] (-) JobUnselected: {'identifier': 'rover_stereo'}
+[0.002032] (rover_lane) JobQueued: {'identifier': 'rover_lane', 'dependencies': OrderedDict([('rover_msgs', '/home/ircv16/team/install/rover_msgs')])}
+[0.002119] (rover_lane) JobStarted: {'identifier': 'rover_lane'}
+[0.016092] (rover_lane) JobEnded: {'identifier': 'rover_lane', 'rc': 1}
+[0.026756] (-) EventReactorShutdown: {}

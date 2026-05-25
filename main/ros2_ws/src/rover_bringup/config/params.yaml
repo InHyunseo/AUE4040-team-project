@@ -43,14 +43,17 @@
     lane:
       input_size: 224
       models:
-        common: "models/center_common.engine"
-        left: "models/center_left.engine"
-        right: "models/center_right.engine"
+        common: "models/e2e_common.engine"
+        left: "models/e2e_left.engine"
+        right: "models/e2e_right.engine"
       smoothing_alpha: 0.7
 
     # ---- decision / FSM ----
     decision:
-      mission: "left"     # left | right
+      # Restrict mission latching to models that are actually loaded. Drop
+      # "left" until the left-branch model is trained — otherwise a stray
+      # left-sign detection latches a mission that can't be served.
+      allowed_missions: ["right"]
       steering_gain_k: 1.2
       safe_dist_m: 0.4
       stop_wait_seconds: 3.0

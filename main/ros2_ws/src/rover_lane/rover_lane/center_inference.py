@@ -23,7 +23,8 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _IMG_SHAPE = (1, 3, 224, 224)
 _STEP_SHAPE = (1, 1)
 _OUTPUT_SHAPE = (1, 6)
-STEP_MAX = 1000.0   # must match action_dataset.STEP_MAX
+# step_max is now per-segment, passed in by ModelManager from the engine's
+# sibling .metadata.json (written by train_e2e.py).
 
 # Action lookup: idx -> (steer, speed) in [-1, +1].
 # Tune these values to match the rover's physical response.
@@ -49,11 +50,12 @@ def preprocess(image_bgr: np.ndarray, size: int = 224) -> np.ndarray:
 class CenterInference:
     """Wraps a TensorRT engine that outputs 6-class action logits."""
 
-    def __init__(self, engine_path: str):
+    def __init__(self, engine_path: str, step_max: float):
         import tensorrt as trt
         import torch
 
         self.engine_path = engine_path
+        self.step_max = float(step_max)
         self._torch = torch
         self.step = 0
 
@@ -98,10 +100,13 @@ class CenterInference:
     def reset_step(self) -> None:
         self.step = 0
 
+    def step_done(self) -> bool:
+        return self.step >= self.step_max
+
     def infer(self, image_bgr: np.ndarray) -> Tuple[float, float]:
         torch = self._torch
         x = preprocess(image_bgr)
-        step_norm = np.array([[min(self.step / STEP_MAX, 1.0)]], dtype=np.float32)
+        step_norm = np.array([[min(self.step / self.step_max, 1.0)]], dtype=np.float32)
         with torch.cuda.stream(self.stream):
             self.dev_img.copy_(torch.from_numpy(x), non_blocking=True)
             self.dev_step.copy_(torch.from_numpy(step_norm), non_blocking=True)
