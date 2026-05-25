@@ -5,7 +5,6 @@ __pycache__/
 data_cache/
 *.ckpt
 *.pth
-*.pt
 *.h5
 *.csv
 *.zip
