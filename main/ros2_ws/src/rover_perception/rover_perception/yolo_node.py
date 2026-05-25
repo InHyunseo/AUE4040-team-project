@@ -19,9 +19,10 @@ class YoloNode(Node):
         self.declare_parameter("conf_threshold", 0.4)
         self.declare_parameter("iou_threshold", 0.5)
         self.declare_parameter("detect_every_n", 2)
+        # Order must match best.pt training (m.names): car/green/left/person/red/right/stop.
+        # Overridden by params.yaml at launch.
         self.declare_parameter("class_names", [
-            "traffic_light_red", "traffic_light_green", "traffic_light_yellow",
-            "stop_sign", "vehicle", "turn_left_sign", "turn_right_sign",
+            "car", "green", "left", "person", "red", "right", "stop",
         ])
 
         self._frame_i = 0

@@ -38,6 +38,8 @@ class ControlNode(Node):
         self.declare_parameter("invert_drive", True)
         self.declare_parameter("max_steer", 0.8)
         self.declare_parameter("max_speed", 0.5)
+        # SLOW state throttle (telop sign convention: negative = forward; matches record_and_label).
+        self.declare_parameter("slow_speed", -0.05)
 
         uart = self.get_parameter("uart_dev").value
         baud = self.get_parameter("baudrate").value
@@ -56,7 +58,12 @@ class ControlNode(Node):
 
     def on_cmd_vel(self, msg: Twist) -> None:
         steering = float(msg.angular.z)
-        throttle = 0.0 if self.fsm_state in SAFE_STATES else float(msg.linear.x)
+        if self.fsm_state in SAFE_STATES:
+            throttle = 0.0
+        elif self.fsm_state == "SLOW":
+            throttle = float(self.get_parameter("slow_speed").value)
+        else:
+            throttle = float(msg.linear.x)
         L, R = steer_speed_to_lr(
             steering,
             throttle,

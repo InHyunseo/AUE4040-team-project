@@ -14,9 +14,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PKG_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PKG_ROOT))
 from models.action_dataset import ActionDataset, NUM_ACTIONS, TRAIN_TRANSFORMS
 from models.center_cnn import build_center_cnn
+
+DEFAULT_DATA_ROOT = PKG_ROOT / "data" / "processed"
+DEFAULT_MODELS_DIR = PKG_ROOT / "models"
 
 
 def train(segment: str, data_dir: Path, epochs: int, out_path: Path, lr: float = 1e-3):
@@ -63,8 +67,13 @@ def train(segment: str, data_dir: Path, epochs: int, out_path: Path, lr: float =
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--segment", required=True, choices=["common", "left", "right"])
-    ap.add_argument("--data", required=True, type=Path)
+    ap.add_argument("--data", type=Path, default=None,
+                    help=f"segment dir (default: {DEFAULT_DATA_ROOT}/<segment>)")
     ap.add_argument("--epochs", type=int, default=20)
-    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"output .pth (default: {DEFAULT_MODELS_DIR}/e2e_<segment>.pth)")
     args = ap.parse_args()
-    train(args.segment, args.data, args.epochs, args.out)
+
+    data = args.data if args.data is not None else DEFAULT_DATA_ROOT / args.segment
+    out = args.out if args.out is not None else DEFAULT_MODELS_DIR / f"e2e_{args.segment}.pth"
+    train(args.segment, data, args.epochs, out)

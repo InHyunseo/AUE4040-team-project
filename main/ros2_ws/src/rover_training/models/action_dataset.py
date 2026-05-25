@@ -3,12 +3,9 @@ Action-classification BC dataset: (image, step) -> action class (0..5).
 
 Reads `annotation.txt` lines: `filename action_idx step` (3 cols, written by
 preprocess.py). Step is normalized to [0, 1] by dividing by STEP_MAX.
-
-hflip: image flipped horizontally + left/right swap (2 <-> 3). Step unchanged.
 """
 import os
 
-import numpy as np
 import PIL.Image
 import torch
 import torch.utils.data
@@ -16,10 +13,10 @@ import torchvision.transforms as transforms
 
 
 NUM_ACTIONS = 6
-HFLIP_SWAP = {2: 3, 3: 2}
-# Frames per session ceiling for step normalization. Sessions longer than this
-# saturate at 1.0 — set to a value safely above your longest expected run.
-STEP_MAX = 1000.0
+# Frames-per-session ceiling for step normalization. Set just above your longest
+# real run so the normalized signal fills [0,1] instead of getting squished into
+# the low end (which would let the FC head learn to ignore it).
+STEP_MAX = 400.0
 
 TRAIN_TRANSFORMS = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -40,10 +37,9 @@ def normalize_step(step: float) -> float:
 
 
 class ActionDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, random_hflip=True, transform=TRAIN_TRANSFORMS):
+    def __init__(self, root_dir, transform=TRAIN_TRANSFORMS):
         super().__init__()
         self.root_dir = root_dir
-        self.random_hflip = random_hflip
         self.transform = transform
         with open(os.path.join(root_dir, "annotation.txt"), "r") as f:
             self.data = [
@@ -63,10 +59,6 @@ class ActionDataset(torch.utils.data.Dataset):
         image = PIL.Image.open(os.path.join(self.root_dir, "images", filename))
         if self.transform is not None:
             image = self.transform(image)
-
-        if self.random_hflip and float(np.random.random(1)) > 0.5:
-            image = torch.flip(image, [-1])
-            action = HFLIP_SWAP.get(action, action)
 
         return (
             image,
