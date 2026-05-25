@@ -5,12 +5,16 @@ Subscribes: /image_rectified (sensor_msgs/Image, bgr8/rgb8),
             /active_model (std_msgs/String)
 Publishes:  /bc_cmd (geometry_msgs/Twist) — linear.x = speed, angular.z = steer
             (decision_node gates this into /cmd_vel)
+            /common_done (std_msgs/Bool) — True once the common BC engine's
+            internal step counter has reached step_max. Latched True from that
+            point on; decision_node uses this to trigger the auto-stop and
+            mission-branch swap.
 """
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
 
 
@@ -42,7 +46,9 @@ class LaneNode(Node):
             self.manager = None
 
         self.prev_steer = 0.0
+        self._common_done_sent = False
         self.cmd_pub = self.create_publisher(Twist, "/bc_cmd", 10)
+        self.done_pub = self.create_publisher(Bool, "/common_done", 10)
         self.create_subscription(Image, "/image_rectified", self.on_image, 10)
         self.create_subscription(String, "/active_model", self.on_active, 10)
 
@@ -83,6 +89,15 @@ class LaneNode(Node):
         out.linear.x = float(speed)
         out.angular.z = float(steer)
         self.cmd_pub.publish(out)
+
+        # Signal end-of-common only while the common model is active. Once sent,
+        # don't spam — decision_node latches the value. Cleared on next run.
+        if (not self._common_done_sent
+                and self.manager.active == "common"
+                and self.manager.step_done()):
+            self.done_pub.publish(Bool(data=True))
+            self._common_done_sent = True
+            self.get_logger().info("common BC step_done — published /common_done")
 
 
 def main():

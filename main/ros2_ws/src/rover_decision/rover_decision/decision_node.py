@@ -3,6 +3,7 @@ Decision node — wires perception + E2E BC -> /cmd_vel + active model tag.
 
 Subscribes: /detections (rover_msgs/DetectionArray)
             /bc_cmd (geometry_msgs/Twist) — raw model (steer, speed)
+            /common_done (std_msgs/Bool) — common BC reached step_max
 Publishes:  /cmd_vel (geometry_msgs/Twist) — gated by FSM + safety
             /active_model (std_msgs/String)
             /fsm_state (rover_msgs/FSMState)
@@ -14,7 +15,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 from rover_msgs.msg import DetectionArray, FSMState
 
@@ -29,12 +30,11 @@ class DecisionNode(Node):
         self.declare_parameter("stable_frames_light", 4)
         self.declare_parameter("stable_frames_turn", 5)
         self.declare_parameter("stable_frames_person", 4)
+        self.declare_parameter("stable_frames_vehicle", 4)
         self.declare_parameter("safe_dist_m", 0.4)
         self.declare_parameter("vehicle_dist_K", 180.0)   # K = bbox_h * d (px*m)
         self.declare_parameter("det_score_min", 0.4)
-        # Turn-sign "reached" threshold: bbox h_px ≥ this → trigger stop+swap
-        self.declare_parameter("turn_sign_close_h_px", 80.0)
-        # Stop duration before resuming into TURNING state
+        # Stop duration before resuming (used for stop sign + turn auto-stop).
         self.declare_parameter("stop_duration_s", 2.0)
         # Person → SLOW duration
         self.declare_parameter("slow_duration_s", 3.0)
@@ -55,10 +55,12 @@ class DecisionNode(Node):
             "left": self.get_parameter("stable_frames_turn").value,
             "right": self.get_parameter("stable_frames_turn").value,
             "person": self.get_parameter("stable_frames_person").value,
+            "car": self.get_parameter("stable_frames_vehicle").value,
         })
         self.last_dets: list = []
         self.stopped_since: float | None = None
         self.slow_since: float | None = None
+        self._common_done = False
         self._log_i = 0
         self._last_state = None
 
@@ -67,6 +69,12 @@ class DecisionNode(Node):
         self.fsm_pub = self.create_publisher(FSMState, "/fsm_state", 10)
         self.create_subscription(DetectionArray, "/detections", self.on_detections, 10)
         self.create_subscription(Twist, "/bc_cmd", self.on_bc_cmd, 10)
+        self.create_subscription(Bool, "/common_done", self.on_common_done, 10)
+
+    def on_common_done(self, msg: Bool) -> None:
+        # Latches True; cleared once we leave COMMON (handled below).
+        if msg.data:
+            self._common_done = True
 
     def on_detections(self, msg: DetectionArray) -> None:
         self.last_dets = list(msg.detections)
@@ -74,18 +82,26 @@ class DecisionNode(Node):
     def on_bc_cmd(self, msg: Twist) -> None:
         score_min = float(self.get_parameter("det_score_min").value)
 
+        # The model often draws both "left" and "right" boxes on the SAME
+        # physical turn sign at near-identical coords (NMS is per-class). Pick
+        # the higher-score one per frame so the stabilizer doesn't accumulate
+        # both counters in parallel and latch the wrong mission.
         present = {}
         vehicle_h_px = 0.0
-        turn_sign_h_px = {"left": 0.0, "right": 0.0}
+        turn_best = None  # (class_name, score)
         for d in self.last_dets:
             if d.score < score_min:
+                continue
+            if d.class_name in ("left", "right"):
+                if turn_best is None or d.score > turn_best[1]:
+                    turn_best = (d.class_name, d.score)
                 continue
             present[d.class_name] = True
             h = max(0.0, float(d.y2) - float(d.y1))
             if d.class_name == "car" and h > vehicle_h_px:
                 vehicle_h_px = h
-            elif d.class_name in turn_sign_h_px and h > turn_sign_h_px[d.class_name]:
-                turn_sign_h_px[d.class_name] = h
+        if turn_best is not None:
+            present[turn_best[0]] = True
 
         stable = self.stab.update(present)
 
@@ -97,16 +113,6 @@ class DecisionNode(Node):
             self.get_parameter("vehicle_dist_K").value,
             self.get_parameter("safe_dist_m").value,
         )
-
-        close_h = float(self.get_parameter("turn_sign_close_h_px").value)
-        # "Reached the turn sign" — once mission is latched, only that side's
-        # bbox counts; before latch, neither side is close yet.
-        if self.fsm.mission == "left":
-            turn_close = turn_sign_h_px["left"] >= close_h
-        elif self.fsm.mission == "right":
-            turn_close = turn_sign_h_px["right"] >= close_h
-        else:
-            turn_close = False
 
         # Timer bookkeeping: arm when entering STOPPED/SLOW, fire when duration elapses.
         now = time.time()
@@ -129,11 +135,12 @@ class DecisionNode(Node):
             green_light_seen=bool(stable.get("green", False)),
             left_sign_stable=left_stable,
             right_sign_stable=right_stable,
-            turn_sign_close=turn_close,
+            car_stable=bool(stable.get("car", False)),
             vehicle_close=v_close,
             stop_timer_elapsed=stop_elapsed,
             person_stable=bool(stable.get("person", False)),
             slow_timer_elapsed=slow_elapsed,
+            common_step_done=self._common_done,
         ))
 
         if state == "STOPPED" and self.stopped_since is None:
@@ -144,6 +151,10 @@ class DecisionNode(Node):
             self.slow_since = now
         elif state != "SLOW":
             self.slow_since = None
+        # Once we've consumed common_step_done into STOPPED(entered_by="turn"),
+        # clear the latch so it doesn't keep re-triggering.
+        if state != "COMMON":
+            self._common_done = False
 
         twist = Twist()
         twist.linear.x = float(msg.linear.x)   # model's speed; control_node zeros it in SAFE states
@@ -169,7 +180,7 @@ class DecisionNode(Node):
                 f"state={state} mission={self.fsm.mission or '-'} "
                 f"model={self.fsm.active_model()} "
                 f"cmd v={msg.linear.x:+.3f} w={msg.angular.z:+.3f} "
-                f"stable={seen} v_close={v_close} turn_close={turn_close}"
+                f"stable={seen} v_close={v_close} common_done={self._common_done}"
             )
 
 

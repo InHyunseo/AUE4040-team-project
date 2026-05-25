@@ -1,72 +1,60 @@
-# Central parameter file. Loaded by launch files and passed to nodes.
+# Central parameter file. Loaded by launch files and passed to ALL nodes.
+#
+# Layout: flat under /**: so any node with declare_parameter(<name>) picks it
+# up regardless of node name. Keys must match the names used in code.
 
 /**:
   ros__parameters:
-    # ---- camera (stereo pair) ----
-    camera:
-      left_sensor_id: 0
-      right_sensor_id: 1
-      width: 1280
-      height: 720
-      display_width: 640
-      display_height: 360
-      fps: 30
-      manual_exposure: true   # see PROJECT_PLAN §9.2
-
     # ---- stereo (rectify only — no disparity at runtime) ----
-    stereo:
-      calib_path: "config/stereo_calib.yaml"
-      sync_slop_s: 0.03
+    cam_width: 1280
+    cam_height: 720
+    fps: 15
+    calib_path: "config/stereo_calib.yaml"
 
     # ---- perception (YOLO) ----
-    perception:
-      engine_path: "models/yolov8n.engine"
-      # input_size is read from the engine at load time (320 for our fine-tuned
-      # 7-class model, 640 for the stock COCO smoke-test engine).
-      conf_threshold: 0.4
-      iou_threshold: 0.5
-      detect_every_n: 2              # YOLO runs at half the camera rate
-      stable_frames_sign: 4
-      stable_frames_light: 4
-      stable_frames_turn: 5
-      class_names:
-        - traffic_light_red
-        - traffic_light_green
-        - traffic_light_yellow
-        - stop_sign
-        - vehicle
-        - turn_left_sign
-        - turn_right_sign
-        - person_sign
+    engine_path: "models/yolov8n.engine"
+    conf_threshold: 0.4
+    iou_threshold: 0.5
+    detect_every_n: 2
+    # Must match best.pt training index order: car/green/left/person/red/right/stop.
+    class_names: ["car", "green", "left", "person", "red", "right", "stop"]
 
-    # ---- lane (center-regression) ----
-    lane:
-      input_size: 224
-      models:
-        common: "models/e2e_common.engine"
-        left: "models/e2e_left.engine"
-        right: "models/e2e_right.engine"
-      smoothing_alpha: 0.7
+    # ---- lane / E2E BC ----
+    model_common: "models/e2e_common.engine"
+    model_left:   "models/e2e_left.engine"
+    model_right:  "models/e2e_right.engine"
+    smoothing_alpha: 0.0
+    steer_gain: 1.0
+    speed_gain: 1.0
+    turn_speed_boost: 0.0
 
     # ---- decision / FSM ----
-    decision:
-      # Restrict mission latching to models that are actually loaded. Drop
-      # "left" until the left-branch model is trained — otherwise a stray
-      # left-sign detection latches a mission that can't be served.
-      allowed_missions: ["right"]
-      steering_gain_k: 1.2
-      safe_dist_m: 0.4
-      stop_wait_seconds: 3.0
-      lane_lost_frames: 10
-      # Bbox-height distance. K = bbox_h_px * d (px * m). Measure once with
-      # scripts/calibrate_vehicle_distance.py and the actual vehicle.
-      vehicle_dist_K: 180.0
-      vehicle_dist_window_n: 5
-      det_score_min: 0.4
+    stable_frames_sign: 4
+    stable_frames_light: 4
+    stable_frames_turn: 5
+    stable_frames_person: 4
+    stable_frames_vehicle: 4
+    safe_dist_m: 0.4
+    # Bbox-height distance. K = bbox_h_px * d (px * m). Measure once with
+    # scripts/calibrate_vehicle_distance.py against /image_rectified.
+    # Current value: from KakaoTalk_20260525_211936721.jpg (car bbox h=390.5px
+    # treated as the stopping-threshold pose) → K = 390.5 * 0.4 = 156.2.
+    # Threshold bbox_h = K / safe_dist_m = 390.5 px.
+    vehicle_dist_K: 156.2
+    det_score_min: 0.4
+    stop_duration_s: 2.0
+    slow_duration_s: 3.0
+    # Restrict mission latching to models that are actually loaded. Drop
+    # "left" until the left-branch model is trained — otherwise a stray
+    # left-sign detection latches a mission that can't be served.
+    allowed_missions: ["right"]
 
     # ---- control ----
-    control:
-      target_speed: 0.35
-      curvature_decel_factor: 0.6
-      max_steer: 0.8
-      max_speed: 0.5
+    uart_dev: "/dev/ttyUSB0"
+    baudrate: 115200
+    invert_drive: false
+    max_steer: 0.8
+    max_speed: 0.5
+    # SLOW state throttle. Telop sign: negative = forward. Cruise is ~-0.18,
+    # so -0.13 is roughly a 0.05-magnitude slow-down.
+    slow_speed: -0.13

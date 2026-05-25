@@ -50,7 +50,15 @@ class YoloNode(Node):
         if n > 1 and (self._frame_i % n) != 0:
             return
 
-        img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+        if msg.encoding not in ("bgr8", "rgb8"):
+            self.get_logger().warn(
+                f"unexpected encoding {msg.encoding!r}; expected bgr8/rgb8")
+            return
+        img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+            msg.height, msg.width, 3)
+        # YoloInference.letterbox/_preprocess expects BGR; flip if upstream is RGB.
+        if msg.encoding == "rgb8":
+            img = img[:, :, ::-1]
         dets = self.engine.infer(img)
 
         out = DetectionArray()
