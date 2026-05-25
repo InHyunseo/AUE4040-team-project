@@ -20,7 +20,10 @@ class LaneNode(Node):
         self.declare_parameter("model_common", "models/e2e_common.engine")
         self.declare_parameter("model_left", "models/e2e_left.engine")
         self.declare_parameter("model_right", "models/e2e_right.engine")
-        self.declare_parameter("smoothing_alpha", 0.7)
+        # 0 = no smoothing (notebook teleop doesn't smooth either). With
+        # action-classification BC, smoothing kills sparse LEFT/RIGHT spikes
+        # before they reach the wheels — turns visibly "jerky and short."
+        self.declare_parameter("smoothing_alpha", 0.0)
         # speed boost during turns: speed *= (1 + k * |steer|). 0 disables.
         self.declare_parameter("turn_speed_boost", 0.0)
         # multiplicative gains for model output before publishing

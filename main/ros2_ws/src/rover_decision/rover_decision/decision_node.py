@@ -59,6 +59,8 @@ class DecisionNode(Node):
         self.last_dets: list = []
         self.stopped_since: float | None = None
         self.slow_since: float | None = None
+        self._log_i = 0
+        self._last_state = None
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.model_pub = self.create_publisher(String, "/active_model", 10)
@@ -155,6 +157,20 @@ class DecisionNode(Node):
         fsm_msg.mission = self.fsm.mission if self.fsm.mission is not None else ""
         fsm_msg.active_model = self.fsm.active_model()
         self.fsm_pub.publish(fsm_msg)
+
+        # Stream decision to the launch console: every tick if state changed,
+        # otherwise every 10th tick so we still see live cmd values.
+        self._log_i += 1
+        state_changed = state != self._last_state
+        self._last_state = state
+        if state_changed or self._log_i % 10 == 0:
+            seen = ",".join(k for k, v in stable.items() if v) or "-"
+            self.get_logger().info(
+                f"state={state} mission={self.fsm.mission or '-'} "
+                f"model={self.fsm.active_model()} "
+                f"cmd v={msg.linear.x:+.3f} w={msg.angular.z:+.3f} "
+                f"stable={seen} v_close={v_close} turn_close={turn_close}"
+            )
 
 
 def main():

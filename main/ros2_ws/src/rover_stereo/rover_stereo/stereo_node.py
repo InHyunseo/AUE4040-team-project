@@ -11,6 +11,7 @@ Distance to the vehicle is computed from its bbox height in rover_decision —
 NOT from disparity. We rectify the right image too (kept for future depth
 work) but discard it at this stage.
 """
+import array
 import sys
 import threading
 import time
@@ -76,12 +77,24 @@ class StereoNode(Node):
         L, R = self.latest["L"], self.latest["R"]
         if L is None or R is None:
             return
+        t0 = time.time()
         # jetcam returns RGB; convert to BGR to match downstream bgr8 expectation
         Lb = L[:, :, ::-1]
         Rb = R[:, :, ::-1]
+        t1 = time.time()
         lr, _rr = self.rectifier.rectify_pair(Lb, Rb)
+        t2 = time.time()
         lr_roi = self.rectifier.crop_to_roi(lr)
+        t3 = time.time()
         self.rect_pub.publish(self._numpy_to_image(lr_roi))
+        t4 = time.time()
+        self._tick_i = getattr(self, "_tick_i", 0) + 1
+        if self._tick_i % 15 == 0:
+            self.get_logger().info(
+                f"_tick: bgr={1000*(t1-t0):.1f}ms rectify={1000*(t2-t1):.1f}ms "
+                f"crop={1000*(t3-t2):.1f}ms pub={1000*(t4-t3):.1f}ms "
+                f"total={1000*(t4-t0):.1f}ms"
+            )
 
     def _numpy_to_image(self, img: np.ndarray) -> Image:
         msg = Image()
@@ -90,7 +103,13 @@ class StereoNode(Node):
         msg.height, msg.width = img.shape[:2]
         msg.encoding = "bgr8"
         msg.step = msg.width * 3
-        msg.data = np.ascontiguousarray(img).tobytes()
+        # Bypass sensor_msgs.Image.data setter — its Python-level per-byte
+        # validation (`all(0 <= v < 256 for v in value)`) costs ~500 ms for a
+        # 1280x720 BGR frame and pins publish rate at <2 Hz. Assigning via the
+        # _data slot with array.array('B', ...) skips the check; rclpy still
+        # serializes correctly because the field type is uint8[].
+        buf = np.ascontiguousarray(img).tobytes()
+        msg._data = array.array("B", buf)
         return msg
 
     def destroy_node(self):

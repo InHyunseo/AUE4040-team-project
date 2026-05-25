@@ -35,7 +35,10 @@ class ControlNode(Node):
         super().__init__("rover_control")
         self.declare_parameter("uart_dev", "/dev/ttyUSB0")
         self.declare_parameter("baudrate", 115200)
-        self.declare_parameter("invert_drive", True)
+        # record_and_label.ipynb sends state["speed"] (negative = forward) to
+        # base_speed_ctrl directly with no inversion, and that's the known-good
+        # path. Matching that here: negative L,R = forward at the firmware.
+        self.declare_parameter("invert_drive", False)
         self.declare_parameter("max_steer", 0.8)
         self.declare_parameter("max_speed", 0.5)
         # SLOW state throttle (telop sign convention: negative = forward; matches record_and_label).
@@ -74,14 +77,41 @@ class ControlNode(Node):
             L, R = -L, -R
         if self.base is not None:
             self.base.base_speed_ctrl(L, R)
+            # Throttled debug so we can see what's actually going to the motor.
+            self._dbg_i = getattr(self, "_dbg_i", 0) + 1
+            if self._dbg_i % 10 == 0:
+                self.get_logger().info(
+                    f"state={self.fsm_state} cmd_v={msg.linear.x:.3f} "
+                    f"cmd_w={msg.angular.z:.3f} -> L={L:.3f} R={R:.3f}"
+                )
         else:
             self.get_logger().info(f"[dry] L={L:.3f} R={R:.3f}")
+
+    def stop_motors(self) -> None:
+        """Send a hard zero to the motor controller. Safe to call repeatedly."""
+        if self.base is None:
+            self.get_logger().info("[dry] stop_motors: L=0 R=0")
+            return
+        try:
+            self.base.base_speed_ctrl(0.0, 0.0)
+        except Exception as e:
+            self.get_logger().error(f"stop_motors failed: {e}")
 
 
 def main():
     rclpy.init()
-    rclpy.spin(ControlNode())
-    rclpy.shutdown()
+    node = ControlNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Ctrl+C / shutdown: explicitly zero the motors so the last cmd_vel
+        # doesn't keep the rover rolling after the node exits.
+        node.stop_motors()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

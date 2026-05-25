@@ -26,15 +26,22 @@ _OUTPUT_SHAPE = (1, 6)
 # step_max is now per-segment, passed in by ModelManager from the engine's
 # sibling .metadata.json (written by train_e2e.py).
 
-# Action lookup: idx -> (steer, speed) in [-1, +1].
-# Tune these values to match the rover's physical response.
+# Action idx -> (steer, speed) absolute command.
+# Values are the per-key MEAN of (steer_tel, speed_tel) across ~/rover_data
+# annotations — i.e. "when the human pressed this key, what was the rover's
+# cumulative state on average". This matches the policy's training target
+# semantics directly. Sign convention: negative speed = forward (telop).
+# Recomputed by:
+#   awk 'NR>1 && $7!="none" { c[$7]++; ss[$7]+=$5; sp[$7]+=$6 } \
+#        END { for(k in c) printf "%s %.3f %.3f\n", k, ss[k]/c[k], sp[k]/c[k] }' \
+#        ~/rover_data/*/annotation.txt
 ACTIONS = {
-    0: (0.0,  -0.15),   # UP        forward
-    1: (0.0,  +0.10),   # DOWN      backward
-    2: (-0.8, -0.25),   # LEFT      sharp left + accel
-    3: (+0.8, -0.25),   # RIGHT     sharp right + accel
-    4: (0.0,  -0.10),   # STRAIGHT  straighten + gentle accel
-    5: (0.0,   0.0),    # SPACE     stop
+    0: ( 0.000, -0.143),   # UP
+    1: ( 0.000,  0.000),   # DOWN     (filtered out of training; placeholder)
+    2: (-0.799, -0.263),   # LEFT
+    3: (+0.794, -0.263),   # RIGHT
+    4: ( 0.000, -0.152),   # STRAIGHT
+    5: ( 0.000,  0.000),   # SPACE    (filtered out of training; placeholder)
 }
 
 
