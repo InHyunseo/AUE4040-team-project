@@ -33,6 +33,12 @@ class LaneNode(Node):
         # multiplicative gains for model output before publishing
         self.declare_parameter("steer_gain", 1.0)
         self.declare_parameter("speed_gain", 1.0)
+        # Branch-entry freeze: zero out steer AND speed for the first N frames
+        # after switching to a left/right model. The training sessions begin
+        # with ~2s of "drive straight + accelerate" before the human pressed
+        # left/right, so the model copies that and delays the turn. We freeze
+        # the rover in place for that window so it doesn't roll past the turn.
+        self.declare_parameter("branch_init_frames", 30)
 
         try:
             from rover_lane.model_manager import ModelManager
@@ -47,6 +53,9 @@ class LaneNode(Node):
 
         self.prev_steer = 0.0
         self._common_done_sent = False
+        # Counts frames since the most recent switch to a left/right model.
+        # Reset to 0 in on_active when the tag changes to a branch tag.
+        self._branch_frames_since_switch = None  # None = not in branch mode
         self.cmd_pub = self.create_publisher(Twist, "/bc_cmd", 10)
         self.done_pub = self.create_publisher(Bool, "/common_done", 10)
         self.create_subscription(Image, "/image_rectified", self.on_image, 10)
@@ -56,9 +65,18 @@ class LaneNode(Node):
         if self.manager is None:
             return
         try:
+            prev = self.manager.active
             self.manager.set_active(msg.data)
         except KeyError as e:
             self.get_logger().warn(f"ignoring unknown model tag: {e}")
+            return
+        # Detect first switch INTO a branch model and arm the freeze.
+        if msg.data in ("left", "right") and prev != msg.data:
+            self._branch_frames_since_switch = 0
+            self.get_logger().info(
+                f"branch entry: freezing (steer=0, speed=0) for "
+                f"{self.get_parameter('branch_init_frames').value} frames"
+            )
 
     def on_image(self, msg: Image) -> None:
         if self.manager is None:
@@ -73,6 +91,18 @@ class LaneNode(Node):
             img = img[:, :, ::-1]
 
         steer, speed = self.manager.infer(img)
+
+        # Branch-entry freeze: hold the rover still for the first N frames
+        # after a branch. Bypasses the model's initial "drive straight" output
+        # so we don't roll past the turn before the model decides to turn.
+        if self._branch_frames_since_switch is not None:
+            n_max = int(self.get_parameter("branch_init_frames").value)
+            if self._branch_frames_since_switch < n_max:
+                steer = 0.0
+                speed = 0.0
+                self._branch_frames_since_switch += 1
+            else:
+                self._branch_frames_since_switch = None  # release control
 
         steer *= float(self.get_parameter("steer_gain").value)
         speed *= float(self.get_parameter("speed_gain").value)

@@ -38,7 +38,7 @@ class FsmInputs:
     stop_timer_elapsed: bool = False
     person_stable: bool = False
     slow_timer_elapsed: bool = False
-    common_step_done: bool = False    # common BC reached step_max → time to turn
+    common_grace_elapsed: bool = False  # ≥common_grace_s since launch → eligible to branch
 
 
 class Fsm:
@@ -112,10 +112,14 @@ class Fsm:
             self.state = self.prev_state
 
         # Normal driving transitions.
-        # End of common segment (BC step_done) AND mission latched → auto-stop,
-        # then resume into TURNING with mission-branch model.
+        # Branch trigger: mission was latched at some earlier point (from a
+        # stable left/right sign detection — possibly long before now) AND
+        # the post-launch grace window has elapsed. The detection is
+        # "remembered" via self.mission; we don't require the sign to still be
+        # visible at branch time. The grace window prevents branching on a
+        # sign detected before the rover actually starts moving.
         if (self.state == COMMON and self.mission is not None
-                and inp.common_step_done):
+                and inp.common_grace_elapsed):
             self.prev_state = TURNING   # restored after stop_timer
             self.state = STOPPED
             self.entered_by = "turn"

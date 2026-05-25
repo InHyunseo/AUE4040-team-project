@@ -9,10 +9,11 @@
     cam_width: 1280
     cam_height: 720
     fps: 15
-    calib_path: "config/stereo_calib.yaml"
+    # Absolute path — the node runs from arbitrary cwd under ros2 launch.
+    calib_path: "/home/ircv16/team/main/ros2_ws/src/rover_stereo/config/stereo_calib.yaml"
 
     # ---- perception (YOLO) ----
-    engine_path: "models/yolov8n.engine"
+    engine_path: "/home/ircv16/team/main/ros2_ws/models/yolov8n.engine"
     conf_threshold: 0.4
     iou_threshold: 0.5
     detect_every_n: 2
@@ -20,13 +21,19 @@
     class_names: ["car", "green", "left", "person", "red", "right", "stop"]
 
     # ---- lane / E2E BC ----
-    model_common: "models/e2e_common.engine"
-    model_left:   "models/e2e_left.engine"
-    model_right:  "models/e2e_right.engine"
+    model_common: "/home/ircv16/team/main/ros2_ws/models/e2e_common.engine"
+    model_left:   "/home/ircv16/team/main/ros2_ws/models/e2e_left.engine"
+    model_right:  "/home/ircv16/team/main/ros2_ws/models/e2e_right.engine"
     smoothing_alpha: 0.0
     steer_gain: 1.0
     speed_gain: 1.0
     turn_speed_boost: 0.0
+    # Branch-entry freeze: first N frames after switching to a left/right
+    # model, force steer=0 and speed=0. The first ~2s of training data is
+    # the human driving straight before pressing left/right, so the model
+    # also drives straight there. Freezing that window keeps the rover
+    # parked until the model starts emitting actual turn commands.
+    branch_init_frames: 60
 
     # ---- decision / FSM ----
     stable_frames_sign: 4
@@ -34,13 +41,18 @@
     stable_frames_turn: 5
     stable_frames_person: 4
     stable_frames_vehicle: 4
-    safe_dist_m: 0.4
+    # Stop further away from cars: 0.4 → 0.667 makes the trigger bbox_h shrink
+    # from 390.5 px to ~234 px (3/5 of the previous threshold).
+    safe_dist_m: 0.667
     # Bbox-height distance. K = bbox_h_px * d (px * m). Measure once with
     # scripts/calibrate_vehicle_distance.py against /image_rectified.
     # Current value: from KakaoTalk_20260525_211936721.jpg (car bbox h=390.5px
     # treated as the stopping-threshold pose) → K = 390.5 * 0.4 = 156.2.
     # Threshold bbox_h = K / safe_dist_m = 390.5 px.
     vehicle_dist_K: 156.2
+    # Person bbox-height threshold (px on /image_rectified). SLOW only when
+    # person_stable AND bbox h ≥ this. Distant person signs are ignored.
+    person_close_h_px: 200.0
     det_score_min: 0.4
     stop_duration_s: 2.0
     slow_duration_s: 3.0
@@ -48,6 +60,13 @@
     # "left" until the left-branch model is trained — otherwise a stray
     # left-sign detection latches a mission that can't be served.
     allowed_missions: ["right"]
+    # Per-label cooldown after a label triggers its action (s). Applies to
+    # stop / red / person / car. Turn signs latch separately (mission state).
+    label_cooldown_s: 10.0
+    # Min seconds in COMMON before any branch is allowed. The mission may
+    # latch earlier (sign detection is remembered); branching just waits for
+    # this grace window to elapse.
+    common_grace_s: 8.0
 
     # ---- control ----
     uart_dev: "/dev/ttyUSB0"

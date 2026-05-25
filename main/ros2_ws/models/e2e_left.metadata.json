@@ -1,0 +1,16 @@
+{
+  "segment": "left",
+  "num_train_frames": 8062,
+  "num_test_frames": 0,
+  "max_step": 1929,
+  "step_max": 2200,
+  "class_counts": {
+    "up": 357,
+    "down": 0,
+    "left": 389,
+    "right": 1342,
+    "straight": 5974,
+    "space": 0
+  },
+  "test_sessions": []
+}
