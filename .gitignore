@@ -4,7 +4,10 @@ __pycache__
 data_cache
 *.ckpt
 *.pth
-
+install
+log
+build
+.agents
 *.h5
 *.csv
 *.zip
