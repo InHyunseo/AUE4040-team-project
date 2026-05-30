@@ -10,23 +10,13 @@
 
 ---
 
-## 태스크 범위
+## 태스크
 
 단순화된 차선 도로에서:
 
 - 차선을 따라 주행 (직선 / 코너 / S자)
 - 전방에 **정지한 차량**이 있으면 회피·추월
-- 추월 결정은 모델이 알아서 학습 (명시적 차선 변경 개념 없음 — 어디를 주행해도 무관)
-
-**이번 태스크에서 제거된 것** (기존 복잡 버전 대비):
-
-- 표지판 (정지 / 좌회전 / 우회전) — 없음
-- 신호등 (red / green) — 없음
-- 회전교차로 — 없음
-- FSM 상태머신 / mission latch — 없음
-- segment 라벨 (common / left / right / pause) — 없음
-
-규칙 기반 FSM 없이 순수 E2E로 주행과 추월을 동시에 학습한다.
+- 추월 결정은 모델이 학습 (명시적 차선 변경 개념 없음 — 어디를 주행해도 무관)
 
 ---
 
@@ -44,12 +34,9 @@ Front 카메라
   → ResNet18-B (FrontEncoder)
 ```
 
-- **FSM 스칼라 없음. 과거 cmd_vel 없음.**
-- BEV 이미지만으로 코너링 중인지 / 직선인지 모델이 직접 판단 가능하므로 별도 시간적 입력 불필요.
-- 차량 bbox 위치 + 크기를 모델이 보고 거리감을 암묵적으로 학습 → 회피·추월 타이밍 결정.
-
-SegFormer와 YOLO는 별도 fine-tuning 후 freeze — 이미지 전처리 전용.
-ResNet18 두 개가 전처리된 이미지를 보고 제어값을 학습.
+- 차량 bbox 위치 + 크기를 보고 거리감을 학습 → 회피·추월 타이밍 결정.
+- SegFormer와 YOLO는 별도 fine-tuning 후 freeze (이미지 전처리 전용).
+- ResNet18 두 개가 전처리된 이미지를 보고 제어값을 학습.
 
 ---
 
@@ -69,13 +56,11 @@ linear.x  = -(0.15 + abs(steer) * 0.10)   # -0.15 ~ -0.25
 angular.z = steer * 0.8                     # -0.8 ~ +0.8
 ```
 
-### waypoint (보조) — 왜 출력이고 보조인가
+### waypoint (보조)
 
-- waypoint는 **입력이 아니라 출력**. multi-task 보조 head다.
-- GT는 cmd_vel을 forward-Euler로 적분한 미래 0.5초 궤적 (로봇 프레임, IMU 불필요).
-- **왜 필요한가**: 같은 이미지(앞에 정지 차량)에서 운전자가 추월하면 steer가 휘고, 멈추면 steer가 0이다. 1프레임 회귀만으로는 두 정답이 충돌해 흐물흐물해진다. waypoint GT(옆으로 휘는 궤적 vs 직선)를 같이 주면 모델이 "의도"를 표현하는 feature를 학습하고, 그 덕에 메인 task인 steer/throttle도 더 잘 나온다.
-- **상관관계는 자동 학습**: 명시적 제약 없음. GT가 물리적으로 일관(steer 휘면 궤적도 휨)되고 backbone을 공유하므로 두 head 출력이 자연히 일관된다.
-- **추론 시 버림**: 실주행에선 waypoint 출력을 쓰지 않으면 자동으로 버려진다. 디버깅/시연 때만 BEV 위에 그려서 모델 의도를 시각화.
+- 출력. GT는 cmd_vel을 forward-Euler로 적분한 미래 0.5초 궤적 (로봇 프레임).
+- 멀티스텝 의도를 backbone에 학습시켜 메인 task(steer/throttle)를 regularize.
+- 추론 시 사용 안 함 (디버깅·시연 때만 BEV에 그려 의도 시각화).
 
 loss: `1.0 * steer + 0.5 * throttle + 0.5 * waypoint` (모두 MSE).
 
@@ -98,15 +83,16 @@ Phase 2 — 대량 rosbag 데이터 (라벨링 X)
     → train: ResNet18×2 + ControlHead + WaypointHead
 ```
 
-- **Phase 1 라벨링은 한 번만.** SegFormer/YOLO 학습용 소량 데이터(클래스당 200장+)만 Roboflow 등으로 라벨링.
-- **Phase 2 본 학습 데이터는 라벨링 0.** cmd_vel은 텔레옵에서 그냥 나오고, 세그/bbox는 freeze된 모델이 자동 생성. → 대량 수집 가능.
-- Phase 1 라벨 데이터는 **실제 트랙 환경**에서 찍은 사진이어야 함 (COCO 등 외부 데이터셋으로 학습한 YOLO는 우리 정지 차량 못 잡음). rosbag에서 stride로 일부 jpg 추출해 라벨링.
+- Phase 1 라벨링은 한 번만 (클래스당 200장+). 실제 트랙 환경 사진으로.
+- Phase 2 본 학습 데이터는 라벨링 0 — cmd_vel은 텔레옵에서, 세그/bbox는 freeze 모델이 자동 생성.
+
+Phase 1 상세는 [PHASE1.md](PHASE1.md) 참고.
 
 ---
 
-## 텔레옵 (데이터 수집 품질)
+## 텔레옵 (데이터 수집)
 
-**1D steering level + throttle coupling** 방식.
+**1D steering level + throttle coupling**.
 
 ```
 turn_level: -5 ~ +5  (a/d 키로 1단계씩 조절)
@@ -114,8 +100,7 @@ turn_level: -5 ~ +5  (a/d 키로 1단계씩 조절)
 회전:  linear.x = -0.25까지 자동 증가, angular.z = ±0.8
 ```
 
-회전 시 throttle이 자동으로 높아져서 차동 모터 토크 부족 문제를 구조적으로 해결.
-이 coupling이 학습 데이터에 그대로 반영되어 모델이 회전 시 자동으로 throttle을 높이는 것을 학습.
+회전 시 throttle이 자동으로 높아져 차동 모터 토크 부족을 해결. 이 coupling이 학습 데이터에 반영됨.
 
 | level | linear.x | angular.z |
 |---:|---:|---:|
@@ -133,9 +118,8 @@ smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
 ## 파이프라인
 
 ```
-1. SegFormer fine-tuning (좌실선/우실선/중앙점선 세그) → freeze
-2. YOLO fine-tuning (car 단일 클래스) → freeze
-     main/train_yolo_colab.ipynb 재사용 (데이터셋만 car 단일 클래스로)
+1. SegFormer fine-tuning (좌실선/우실선/중앙점선) → freeze   [training/train_segformer_colab.ipynb]
+2. YOLO fine-tuning (car 단일 클래스) → freeze              [training/train_yolo_colab.ipynb]
 3. BEV 캘리브레이션
      ros2 launch rover_calib bev_capture.launch.py → calib 이미지 한 장
      python data_pipeline/bev_calibration.py --image ... → calib.json (M, bev_size, ppm)
@@ -151,16 +135,4 @@ smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
 8. rover_lane 노드 교체 → 실차 테스트
 ```
 
-자세한 ROS2 노드 사용법은 [ros2_ws/README.md](ros2_ws/README.md) 참고.
-
----
-
-## 기존 코드 변경점
-
-```
-그대로 유지:  rover_camera, rover_stereo(미사용), UART/모터
-바뀌는 것:    rover_lane 내부 모델 교체 (E2ENet)
-              텔레옵 방식 (버튼식 → 1D steering level)
-추가:         SegFormer BEV 전처리, YOLO car 전처리, waypoint 보조 head
-제거:         FSM, mission, segment, 표지판/신호등/회전교차로 전부
-```
+ROS2 노드 사용법은 [ros2_ws/README.md](ros2_ws/README.md) 참고.
