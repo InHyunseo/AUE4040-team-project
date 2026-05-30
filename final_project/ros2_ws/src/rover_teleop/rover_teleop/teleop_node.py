@@ -10,7 +10,6 @@ Keys (terminal must be foreground TTY — works over SSH; do NOT pipe):
   space         : level=0, drive off (hard stop)
   g             : toggle drive on/off  (recording still controlled separately)
   r             : toggle /record_enable (recorder_node listens to this)
-  1 / 2 / 3 / 4 : segment label common / left / right / pause
   q  or  ESC    : quit
 
 pynput would need X. termios cbreak reads keys directly from the controlling
@@ -20,7 +19,6 @@ main/ros2_ws/.../scripts/teleop_record.py.
 Publishes:
   /cmd_vel        geometry_msgs/Twist        (smoothed)
   /steer_level    std_msgs/Int8              (raw current level)
-  /segment        std_msgs/String            (common/left/right/pause)
   /record_enable  std_msgs/Bool              (toggle for recorder_node)
 """
 from __future__ import annotations
@@ -33,7 +31,7 @@ import tty
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Int8, String
+from std_msgs.msg import Bool, Int8
 
 
 BASE_V       = 0.15
@@ -63,13 +61,11 @@ class TeleopNode(Node):
         super().__init__("rover_teleop")
         self.pub_cmd     = self.create_publisher(Twist,  "/cmd_vel",       10)
         self.pub_level   = self.create_publisher(Int8,   "/steer_level",   10)
-        self.pub_segment = self.create_publisher(String, "/segment",       10)
         self.pub_rec     = self.create_publisher(Bool,   "/record_enable", 10)
 
         self.turn_level  = 0
         self.driving     = False
         self.recording   = False
-        self.segment     = "common"
 
         self.cur_lin = 0.0
         self.cur_ang = 0.0
@@ -84,18 +80,14 @@ class TeleopNode(Node):
         self._old_term = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
 
-        # Publish initial labels so subscribers latch a known state.
-        self._publish_segment()
+        # Publish initial state so subscribers latch a known value.
         self._publish_record()
 
         self.timer = self.create_timer(1.0 / TICK_HZ, self._tick)
         self.get_logger().info(
             "teleop ready. keys: a/d=level, space=stop, g=drive, r=record, "
-            "1/2/3/4=segment, q/ESC=quit"
+            "q/ESC=quit"
         )
-
-    def _publish_segment(self) -> None:
-        m = String(); m.data = self.segment; self.pub_segment.publish(m)
 
     def _publish_record(self) -> None:
         m = Bool(); m.data = self.recording; self.pub_rec.publish(m)
@@ -128,11 +120,6 @@ class TeleopNode(Node):
                 self.recording = not self.recording
                 self._publish_record()
                 self.get_logger().info(f"recording = {self.recording}")
-            elif c in ("1", "2", "3", "4"):
-                self.segment = {"1": "common", "2": "left",
-                                "3": "right",  "4": "pause"}[c]
-                self._publish_segment()
-                self.get_logger().info(f"segment = {self.segment}")
         return False
 
     def _tick(self) -> None:

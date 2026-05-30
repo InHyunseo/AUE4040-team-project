@@ -16,15 +16,14 @@ import h5py
 import numpy as np
 
 
-SEG_COLORS = [(0, 0, 255),     # solid L  - red
-              (0, 255, 0),     # solid R  - green
-              (255, 0, 0),     # dashed L - blue
-              (0, 255, 255)]   # dashed R - yellow
+SEG_COLORS = [(0, 0, 255),     # left-solid    - red
+              (0, 255, 0),     # right-solid   - green
+              (255, 0, 0)]     # center-dashed - blue
 
 
 def overlay_seg(bev: np.ndarray, seg: np.ndarray) -> np.ndarray:
     out = bev.copy()
-    for c in range(4):
+    for c in range(len(SEG_COLORS)):
         m = seg[c] > 0
         if not m.any():
             continue
@@ -60,7 +59,7 @@ def draw_bbox(front: np.ndarray, det: np.ndarray) -> np.ndarray:
         return out
     cv2.rectangle(out, (int(x), int(y)), (int(x + w), int(y + h)),
                   (0, 255, 0), 2)
-    cv2.putText(out, f"vehicle {conf:.2f}", (int(x), max(0, int(y) - 4)),
+    cv2.putText(out, f"car {conf:.2f}", (int(x), max(0, int(y) - 4)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     return out
 

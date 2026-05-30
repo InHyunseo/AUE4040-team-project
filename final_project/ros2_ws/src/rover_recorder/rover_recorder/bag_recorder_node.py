@@ -4,9 +4,8 @@ Topic schema is locked by final_project/data_pipeline/extract_labels.py:
   /bev_image/compressed     sensor_msgs/CompressedImage
   /front_image/compressed   sensor_msgs/CompressedImage
   /cmd_vel                  geometry_msgs/Twist
-Plus side-channels we want available later:
+Plus side-channel we want available later:
   /steer_level              std_msgs/Int8     (raw teleop input)
-  /segment                  std_msgs/String   (label)
 
 The bag goes to <out_root>/<session>_<ts>/bag/  so it lines up with the path
 extract_labels.py expects (`--bag <session_dir>/bag`).
@@ -36,7 +35,6 @@ DEFAULT_TOPICS = [
     "/front_image/compressed",
     "/cmd_vel",
     "/steer_level",
-    "/segment",
 ]
 
 

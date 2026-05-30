@@ -1,4 +1,4 @@
-"""Generate labels_cache.h5 from a rosbag2 .db3.
+"""Generate labels_cache.h5 from a rosbag2 .db3 (차선 주행 + 정지 차량 추월).
 
 Reads three topics:
   /bev_image/compressed     sensor_msgs/CompressedImage
@@ -10,23 +10,35 @@ sample (both within ±SYNC_TOL ns), then generates:
 
   bev        (224,224,3) uint8   warped via calib.M
   front      (224,224,3) uint8   resized
-  seg        (4,224,224) uint8   HSV mask + zone-validated, on BEV plane
+  seg        (3,224,224) uint8   SegFormer lane masks on BEV plane
+                                 ch0=left-solid, ch1=right-solid, ch2=center-dashed
   det        (5,)        float32 [x,y,w,h,conf] on front (pixels, conf in [0,1])
+                                 YOLO single-class (car); zeros if no car
   waypoint   (5,2)       float32 future (x,y) in meters, robot frame
   steer      ()          float32 angular.z at t
   throttle   ()          float32 linear.x  at t
   timestamp_ns int64
 
 Runs WITHOUT ROS2 or camera hardware. Pure rosbags + opencv + numpy + h5py
-+ (optional) HF transformers for GroundingDINO.
++ transformers (SegFormer) + ultralytics (YOLO).
 
   python extract_labels.py --bag /path/to/rosbag2_dir --calib ../calib/calib.json \
+      --segformer_ckpt ../models/segformer_lane \
+      --yolo_weights ../../main/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
 
+SegFormer and YOLO are FROZEN: fine-tuned once on small labeled sets (Phase 1),
+then used here for offline label extraction and on-vehicle inference alike.
+
+Overlay contract (training-time transform, must match inference in rover_lane):
+  - BEV overlay fed to BEVEncoder = warped BEV with the 3 seg channels
+    alpha-blended in color (ch0=red, ch1=green, ch2=blue).
+  - Front overlay fed to FrontEncoder = front image with the car bbox drawn.
+  The H5 stores raw bev/front + seg/det separately; the dataloader composites
+  the overlays so the exact compositing can be tuned without re-extracting.
+
 NOTE on main/ coupling: this script imports NOTHING from main/. Its only
-contract with main/ is the rosbag topic schema above, which a future ROS2
-recorder under main/ros2_ws/src/rover_recorder/ must publish. See
-final_project/README.md "Pipeline integration with main/".
+contract with main/ is the rosbag topic schema above.
 """
 
 from __future__ import annotations
@@ -58,15 +70,7 @@ WP_DT        = WP_HORIZON_S / WP_N
 
 FRONT_SIZE = (224, 224)
 
-# HSV thresholds — tune on a sample frame.
-HSV_WHITE = ((0, 0, 200), (180, 40, 255))            # solid lanes
-HSV_YELLOW = ((15, 80, 120), (35, 255, 255))         # dashed lanes
-
-# Zone validation bands on BEV (top=far, bottom=near). Near/mid must have a
-# mask blob; far is allowed to be empty.
-ZONE_BANDS = [("far", 0.0, 0.33, False),
-              ("mid", 0.33, 0.66, True),
-              ("near", 0.66, 1.0, True)]
+SEG_N_CLASSES = 3  # 0=left-solid, 1=right-solid, 2=center-dashed (background excluded)
 
 # -------------------------------------------------------------------- helpers
 
@@ -117,48 +121,57 @@ def nearest(sorted_ts, t):
     return i - 1 if (t - sorted_ts[i - 1]) <= (sorted_ts[i] - t) else i
 
 
-# -------------------------------------------------------------------- seg
+# -------------------------------------------------------------------- seg (SegFormer)
 
 
-def hsv_lane_mask(bgr_bev: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    hsv = cv2.cvtColor(bgr_bev, cv2.COLOR_BGR2HSV)
-    solid = cv2.inRange(hsv, np.array(HSV_WHITE[0]), np.array(HSV_WHITE[1]))
-    dashed = cv2.inRange(hsv, np.array(HSV_YELLOW[0]), np.array(HSV_YELLOW[1]))
-    k = np.ones((3, 3), np.uint8)
-    solid = cv2.morphologyEx(solid, cv2.MORPH_OPEN, k)
-    dashed = cv2.morphologyEx(dashed, cv2.MORPH_OPEN, k)
-    return solid, dashed
+class SegFormerLaneSeg:
+    """Frozen SegFormer lane segmenter (Phase-1 fine-tuned, then frozen).
 
+    Runs on the warped BEV image and returns (3, H, W) uint8 masks in {0,255}:
+      ch0 = left-solid, ch1 = right-solid, ch2 = center-dashed.
 
-def split_lr(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    h, w = mask.shape
-    left = mask.copy(); left[:, w // 2:] = 0
-    right = mask.copy(); right[:, :w // 2] = 0
-    return left, right
+    The fine-tuned checkpoint's id2label is expected to have 4 entries:
+      0=background, 1=left-solid, 2=right-solid, 3=center-dashed
+    (i.e. SEG_N_CLASSES semantic classes + background). The output drops the
+    background channel.
 
+    Lazy heavy imports inside __init__ so the module stays importable without
+    transformers/torch installed.
+    """
 
-def zone_ok(mask: np.ndarray) -> bool:
-    h = mask.shape[0]
-    for _, y0f, y1f, required in ZONE_BANDS:
-        if not required:
-            continue
-        band = mask[int(y0f * h):int(y1f * h)]
-        if band.sum() == 0:
-            return False
-    return True
+    N_CLASSES = SEG_N_CLASSES
 
+    def __init__(self, checkpoint_path: str, device: str = "cuda"):
+        from transformers import (SegformerForSemanticSegmentation,
+                                  SegformerImageProcessor)
+        import torch
 
-def build_seg(bev_bgr: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
-    """Return (4, H, W) uint8 in {0,255}: solidL, solidR, dashedL, dashedR."""
-    solid, dashed = hsv_lane_mask(bev_bgr)
-    sL, sR = split_lr(solid)
-    dL, dR = split_lr(dashed)
-    out = np.stack([sL, sR, dL, dR], axis=0)
-    if prev is not None:
-        for c in range(4):
-            if not zone_ok(out[c]):
-                out[c] = prev[c]
-    return out
+        self.torch = torch
+        self.device = device
+        self.processor = SegformerImageProcessor.from_pretrained(checkpoint_path)
+        self.model = SegformerForSemanticSegmentation.from_pretrained(
+            checkpoint_path).to(device)
+        self.model.eval()
+
+    @staticmethod
+    def empty(h: int, w: int) -> np.ndarray:
+        return np.zeros((SEG_N_CLASSES, h, w), dtype=np.uint8)
+
+    def __call__(self, bev_bgr: np.ndarray) -> np.ndarray:
+        h, w = bev_bgr.shape[:2]
+        rgb = cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2RGB)
+        inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
+        with self.torch.no_grad():
+            logits = self.model(**inputs).logits           # (1, C, h', w')
+        # upsample to BEV resolution, then argmax over classes
+        logits = self.torch.nn.functional.interpolate(
+            logits, size=(h, w), mode="bilinear", align_corners=False)
+        cls_map = logits.argmax(dim=1)[0].cpu().numpy()     # (h, w), values 0..C-1
+        # background = 0; semantic classes 1..SEG_N_CLASSES map to channels 0..N-1
+        out = np.zeros((SEG_N_CLASSES, h, w), dtype=np.uint8)
+        for c in range(SEG_N_CLASSES):
+            out[c][cls_map == (c + 1)] = 255
+        return out
 
 
 # -------------------------------------------------------------------- waypoint
@@ -200,45 +213,61 @@ def waypoint_gt(cmds: list[CmdSample], cmd_ts: list[int], t0_ns: int) -> np.ndar
     return np.asarray(samples, dtype=np.float32)
 
 
-# -------------------------------------------------------------------- det (GDINO)
+# -------------------------------------------------------------------- det (YOLO)
 
 
-class GroundingDinoDet:
-    """Wrap HF IDEA-Research/grounding-dino-tiny. Lazy import."""
+class YoloCarDet:
+    """Frozen YOLOv8 (ultralytics best.pt) single-class car detector.
 
-    def __init__(self, device: str = "cuda", prompt: str = "a car. a toy car."):
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        import torch
-        self.torch = torch
+    For OFFLINE label extraction (not the TensorRT runtime used on the rover).
+    __call__ returns the highest-conf car bbox as (5,) [x,y,w,h,conf] in
+    front-image pixels (x,y = top-left), or zeros(5) if no car.
+
+    Keeps bbox AND size so the model learns both position and apparent distance.
+
+    Lazy import of ultralytics inside __init__.
+    """
+
+    def __init__(self, weights_path: str, device: str = "cuda",
+                 imgsz: int = 320, conf: float = 0.25, iou: float = 0.5,
+                 car_class: str = "car"):
+        from ultralytics import YOLO
+
+        self.model = YOLO(weights_path)
         self.device = device
-        self.prompt = prompt
-        model_id = "IDEA-Research/grounding-dino-tiny"
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
-        self.model.eval()
+        self.imgsz = imgsz
+        self.conf = conf
+        self.iou = iou
+        # resolve the car class id. names is {id: name}. Single-class models
+        # accept any detection as a car.
+        names = self.model.names
+        if len(names) == 1:
+            self.car_id = next(iter(names))
+        else:
+            self.car_id = next((i for i, n in names.items() if n == car_class), None)
+            if self.car_id is None:
+                raise RuntimeError(
+                    f"class '{car_class}' not in YOLO names {names}")
 
     @staticmethod
     def empty() -> np.ndarray:
         return np.zeros(5, dtype=np.float32)
 
-    def __call__(self, bgr: np.ndarray) -> np.ndarray:
-        from PIL import Image
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-        inputs = self.processor(images=pil, text=self.prompt, return_tensors="pt").to(self.device)
-        with self.torch.no_grad():
-            out = self.model(**inputs)
-        results = self.processor.post_process_grounded_object_detection(
-            out, inputs.input_ids, threshold=0.3, text_threshold=0.25,
-            target_sizes=[pil.size[::-1]],
-        )[0]
-        boxes = results["boxes"].cpu().numpy() if len(results["boxes"]) else None
-        scores = results["scores"].cpu().numpy() if len(results["scores"]) else None
-        if boxes is None or len(boxes) == 0:
+    def __call__(self, front_bgr: np.ndarray) -> np.ndarray:
+        res = self.model.predict(front_bgr, imgsz=self.imgsz, conf=self.conf,
+                                 iou=self.iou, device=self.device, verbose=False)[0]
+        if res.boxes is None or len(res.boxes) == 0:
             return self.empty()
-        k = int(scores.argmax())
-        x1, y1, x2, y2 = boxes[k]
-        return np.array([x1, y1, x2 - x1, y2 - y1, float(scores[k])], dtype=np.float32)
+        cls = res.boxes.cls.cpu().numpy().astype(int)
+        confs = res.boxes.conf.cpu().numpy()
+        xyxy = res.boxes.xyxy.cpu().numpy()
+        mask = cls == self.car_id
+        if not mask.any():
+            return self.empty()
+        idx = np.where(mask)[0]
+        k = idx[int(confs[idx].argmax())]
+        x1, y1, x2, y2 = xyxy[k]
+        return np.array([x1, y1, x2 - x1, y2 - y1, float(confs[k])], dtype=np.float32)
 
 
 # -------------------------------------------------------------------- debug viz
@@ -246,10 +275,12 @@ class GroundingDinoDet:
 
 def save_debug(path: Path, bev: np.ndarray, front: np.ndarray,
                seg: np.ndarray, det: np.ndarray, wps: np.ndarray, ppm: float):
-    colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]
+    # ch0=left-solid red, ch1=right-solid green, ch2=center-dashed blue
+    colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
     bev_vis = bev.copy()
-    for c in range(4):
-        bev_vis[seg[c] > 0] = (bev_vis[seg[c] > 0] * 0.4 + np.array(colors[c]) * 0.6).astype(np.uint8)
+    for c in range(SEG_N_CLASSES):
+        m = seg[c] > 0
+        bev_vis[m] = (bev_vis[m] * 0.4 + np.array(colors[c]) * 0.6).astype(np.uint8)
     H, W = bev_vis.shape[:2]
     ox, oy = W // 2, H - H // 8
     for (x_m, y_m) in wps:
@@ -262,7 +293,7 @@ def save_debug(path: Path, bev: np.ndarray, front: np.ndarray,
         x, y, w, h, conf = det
         cv2.rectangle(front_vis, (int(x), int(y)), (int(x + w), int(y + h)),
                       (0, 255, 0), 2)
-        cv2.putText(front_vis, f"{conf:.2f}", (int(x), int(y) - 4),
+        cv2.putText(front_vis, f"car {conf:.2f}", (int(x), int(y) - 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     pad = np.hstack([bev_vis, front_vis])
@@ -276,14 +307,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bag", required=True, type=Path)
     ap.add_argument("--calib", required=True, type=Path)
+    ap.add_argument("--segformer_ckpt", type=Path, default=None,
+                    help="fine-tuned SegFormer lane checkpoint dir (required)")
+    ap.add_argument("--yolo_weights", type=Path,
+                    default=Path(__file__).resolve().parents[2] / "main" / "best.pt",
+                    help="ultralytics YOLO best.pt (single-class car)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parents[1] / "labels_cache.h5")
     ap.add_argument("--debug_dir", type=Path,
                     default=Path(__file__).resolve().parents[1] / "debug_samples")
     ap.add_argument("--limit", type=int, default=0, help="cap N frames (0=all)")
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    ap.add_argument("--skip_det", action="store_true", help="skip GroundingDINO")
+    ap.add_argument("--skip_det", action="store_true", help="skip YOLO car detection")
     args = ap.parse_args()
+
+    if args.segformer_ckpt is None:
+        raise SystemExit(
+            "--segformer_ckpt is required. Fine-tune SegFormer (Phase 1) first, "
+            "then pass the checkpoint dir.")
 
     calib = json.loads(args.calib.read_text())
     M = np.asarray(calib["M"], dtype=np.float64)
@@ -299,7 +340,9 @@ def main():
     front_ts = [t for t, _ in front_msgs]
     cmd_ts = [c.t_ns for c in cmds]
 
-    det = None if args.skip_det else GroundingDinoDet(device=args.device)
+    print(f"loading SegFormer {args.segformer_ckpt} ...")
+    segmenter = SegFormerLaneSeg(str(args.segformer_ckpt), device=args.device)
+    det = None if args.skip_det else YoloCarDet(str(args.yolo_weights), device=args.device)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -318,14 +361,13 @@ def main():
 
         d_bev   = dset("bev", (bev_h, bev_w, 3), "uint8")
         d_front = dset("front", (FRONT_SIZE[1], FRONT_SIZE[0], 3), "uint8")
-        d_seg   = dset("seg", (4, bev_h, bev_w), "uint8")
+        d_seg   = dset("seg", (SEG_N_CLASSES, bev_h, bev_w), "uint8")
         d_det   = dset("det", (5,), "float32")
         d_wp    = dset("waypoint", (WP_N, 2), "float32")
         d_steer = dset("steer", (), "float32")
         d_thr   = dset("throttle", (), "float32")
         d_ts    = dset("timestamp_ns", (), "int64")
 
-        prev_seg = None
         kept = 0
         for i, (t_ns, bev_src) in enumerate(bev_msgs[:n_candidate]):
             j = nearest(front_ts, t_ns)
@@ -341,9 +383,8 @@ def main():
 
             bev = cv2.warpPerspective(bev_src, M, (bev_w, bev_h))
             front = cv2.resize(front_msgs[j][1], FRONT_SIZE)
-            seg = build_seg(bev, prev_seg)
-            prev_seg = seg
-            det_arr = det(front) if det is not None else GroundingDinoDet.empty()
+            seg = segmenter(bev)
+            det_arr = det(front) if det is not None else YoloCarDet.empty()
 
             v = cmds[ci].v
             w = cmds[ci].w
@@ -371,6 +412,7 @@ def main():
         h5.attrs["bev_size"] = [bev_w, bev_h]
         h5.attrs["wp_horizon_s"] = WP_HORIZON_S
         h5.attrs["wp_n"] = WP_N
+        h5.attrs["seg_n_classes"] = SEG_N_CLASSES
         h5.attrs["bag"] = str(args.bag)
 
     print(f"done. kept={kept} -> {args.out}")
