@@ -38,7 +38,7 @@
     # ---- decision / FSM ----
     stable_frames_sign: 4
     stable_frames_light: 4
-    stable_frames_turn: 5
+    stable_frames_turn: 10
     stable_frames_person: 4
     stable_frames_vehicle: 4
     # Stop further away from cars: 0.4 → 0.667 makes the trigger bbox_h shrink
@@ -52,14 +52,14 @@
     vehicle_dist_K: 156.2
     # Person bbox-height threshold (px on /image_rectified). SLOW only when
     # person_stable AND bbox h ≥ this. Distant person signs are ignored.
-    person_close_h_px: 200.0
+    person_close_h_px: 120.0
     det_score_min: 0.4
     stop_duration_s: 2.0
     slow_duration_s: 3.0
     # Restrict mission latching to models that are actually loaded. Drop
     # "left" until the left-branch model is trained — otherwise a stray
     # left-sign detection latches a mission that can't be served.
-    allowed_missions: ["right"]
+    allowed_missions: ["left", "right"]
     # Per-label cooldown after a label triggers its action (s). Applies to
     # stop / red / person / car. Turn signs latch separately (mission state).
     label_cooldown_s: 10.0
@@ -76,4 +76,4 @@
     max_speed: 0.5
     # SLOW state throttle. Telop sign: negative = forward. Cruise is ~-0.18,
     # so -0.13 is roughly a 0.05-magnitude slow-down.
-    slow_speed: -0.13
+    slow_speed: -0.11

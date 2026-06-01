@@ -15,7 +15,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 from rover_msgs.msg import DetectionArray, FSMState
 
@@ -85,12 +85,19 @@ class DecisionNode(Node):
         self._cooldown_labels = ("stop", "person", "car")
         # Wall time when COMMON started — used to gate branch transitions.
         self._common_started_at: float = time.time()
+        # Latched once /branch_done fires (cleared on STATE leaving TURNING).
+        self._branch_done = False
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.model_pub = self.create_publisher(String, "/active_model", 10)
         self.fsm_pub = self.create_publisher(FSMState, "/fsm_state", 10)
         self.create_subscription(DetectionArray, "/detections", self.on_detections, 10)
         self.create_subscription(Twist, "/bc_cmd", self.on_bc_cmd, 10)
+        self.create_subscription(Bool, "/branch_done", self.on_branch_done, 10)
+
+    def on_branch_done(self, msg: Bool) -> None:
+        if msg.data:
+            self._branch_done = True
 
     def on_detections(self, msg: DetectionArray) -> None:
         self.last_dets = list(msg.detections)
@@ -126,6 +133,17 @@ class DecisionNode(Node):
             present[turn_best[0]] = True
 
         stable = self.stab.update(present)
+
+        # While the BC is actively cornering (TURNING + large |steer|), drop
+        # ALL perception triggers. A one-frame person/car/sign detection
+        # mid-corner would yank the FSM into SLOW/WAITING, which momentarily
+        # flips active_model back to common and (when TURNING resumes) makes
+        # lane_node re-trigger its branch_init freeze — visible in logs as
+        # repeated "branch entry: freezing" lines during a single right turn.
+        cornering_steer = 0.5
+        if (self.fsm.state == "TURNING"
+                and abs(float(msg.angular.z)) >= cornering_steer):
+            stable = {k: False for k in stable}
 
         # Per-label cooldown: once a label has triggered its FSM action we
         # suppress it for label_cooldown_s so the same sign / light / person
@@ -189,6 +207,7 @@ class DecisionNode(Node):
             person_stable=bool(stable.get("person", False)) and person_close,
             slow_timer_elapsed=slow_elapsed,
             common_grace_elapsed=common_grace_elapsed,
+            branch_step_done=self._branch_done,
         ))
 
         if state == "STOPPED" and self.stopped_since is None:
@@ -227,12 +246,15 @@ class DecisionNode(Node):
                 f"TURNING_{self.fsm.mission.upper()}"
                 if state == "TURNING" and self.fsm.mission else state
             )
+            slow_age = (now - self.slow_since) if self.slow_since else -1
             self.get_logger().info(
-                f"state={display_state} mission={self.fsm.mission or '-'} "
+                f"state={display_state} prev={self.fsm.prev_state} "
+                f"mission={self.fsm.mission or '-'} "
                 f"model={self.fsm.active_model()} "
                 f"cmd v={msg.linear.x:+.3f} w={msg.angular.z:+.3f} "
                 f"stable={seen} v_close={v_close} "
-                f"grace_elapsed={common_grace_elapsed}"
+                f"grace={common_grace_elapsed} "
+                f"slow_age={slow_age:.1f} slow_elapsed={slow_elapsed}"
             )
 
 

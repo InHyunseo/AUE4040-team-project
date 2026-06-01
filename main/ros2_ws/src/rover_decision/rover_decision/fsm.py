@@ -39,6 +39,7 @@ class FsmInputs:
     person_stable: bool = False
     slow_timer_elapsed: bool = False
     common_grace_elapsed: bool = False  # ≥common_grace_s since launch → eligible to branch
+    branch_step_done: bool = False    # branch (left/right) BC reached step_max → ARRIVED
 
 
 class Fsm:
@@ -123,11 +124,20 @@ class Fsm:
             self.prev_state = TURNING   # restored after stop_timer
             self.state = STOPPED
             self.entered_by = "turn"
-        elif self.state == TURNING and inp.lane_lost:
+        elif self.state == TURNING and (inp.branch_step_done or inp.lane_lost):
             self.state = ARRIVED
         return self.state
 
     def active_model(self) -> str:
-        if self.state == TURNING and self.mission is not None:
+        # Once mission is latched AND we've committed to the branch (prev_state
+        # was set to TURNING at branch trigger), stick with the branch model
+        # even during transient SLOW/WAITING/STOPPED. Otherwise SLOW from a
+        # one-frame person detection would yank us back to "common" and
+        # re-trigger lane_node's branch_init freeze on the next TURNING.
+        committed_to_branch = (
+            self.mission is not None
+            and (self.state == TURNING or self.prev_state == TURNING)
+        )
+        if committed_to_branch:
             return self.mission  # "left" or "right"
         return "common"

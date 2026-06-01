@@ -17,6 +17,8 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
 
+from rover_msgs.msg import FSMState
+
 
 class LaneNode(Node):
     def __init__(self):
@@ -53,13 +55,24 @@ class LaneNode(Node):
 
         self.prev_steer = 0.0
         self._common_done_sent = False
+        self._branch_done_sent = False
         # Counts frames since the most recent switch to a left/right model.
         # Reset to 0 in on_active when the tag changes to a branch tag.
         self._branch_frames_since_switch = None  # None = not in branch mode
+        # Mirror of FSM state. While the rover is stopped (STOPPED/WAITING/
+        # ARRIVED), skip inference entirely so the step counter doesn't tick
+        # up while the rover sits still — step should track real progress
+        # through the course, not wall time.
+        self._fsm_state = "COMMON"
         self.cmd_pub = self.create_publisher(Twist, "/bc_cmd", 10)
         self.done_pub = self.create_publisher(Bool, "/common_done", 10)
+        self.branch_done_pub = self.create_publisher(Bool, "/branch_done", 10)
         self.create_subscription(Image, "/image_rectified", self.on_image, 10)
         self.create_subscription(String, "/active_model", self.on_active, 10)
+        self.create_subscription(FSMState, "/fsm_state", self.on_fsm, 10)
+
+    def on_fsm(self, msg: FSMState) -> None:
+        self._fsm_state = msg.state
 
     def on_active(self, msg: String) -> None:
         if self.manager is None:
@@ -80,6 +93,16 @@ class LaneNode(Node):
 
     def on_image(self, msg: Image) -> None:
         if self.manager is None:
+            return
+        # While the rover is stopped, publish a zero cmd and skip inference
+        # (which would tick the BC step counter — step should track distance
+        # driven, not wall time). We still publish /bc_cmd so decision_node's
+        # FSM keeps running its timers and can release STOPPED → resume.
+        if self._fsm_state in ("STOPPED", "WAITING", "ARRIVED"):
+            out = Twist()
+            out.linear.x = 0.0
+            out.angular.z = 0.0
+            self.cmd_pub.publish(out)
             return
         if msg.encoding not in ("bgr8", "rgb8"):
             self.get_logger().warn(
@@ -128,6 +151,17 @@ class LaneNode(Node):
             self.done_pub.publish(Bool(data=True))
             self._common_done_sent = True
             self.get_logger().info("common BC step_done — published /common_done")
+
+        # Signal end-of-branch (left/right reached step_max) → triggers ARRIVED.
+        if (not self._branch_done_sent
+                and self.manager.active in ("left", "right")
+                and self.manager.step_done()):
+            self.branch_done_pub.publish(Bool(data=True))
+            self._branch_done_sent = True
+            self.get_logger().info(
+                f"branch BC ({self.manager.active}) step_done — "
+                f"published /branch_done"
+            )
 
 
 def main():
