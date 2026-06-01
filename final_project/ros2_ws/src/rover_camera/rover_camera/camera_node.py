@@ -1,11 +1,15 @@
 """Dual CSI camera publisher.
 
 Publishes:
-  /bev_image/compressed    sensor_msgs/CompressedImage  — BEV camera (down-tilt)
-  /front_image/compressed  sensor_msgs/CompressedImage  — Front camera
+  /lane_image/compressed   sensor_msgs/CompressedImage  — lane camera (sensor 0, lane-seg head)
+  /front_image/compressed  sensor_msgs/CompressedImage  — front camera (sensor 1, object-detection head)
+
+Both streams are raw monocular images. BEV warp was dropped — the camera sits
+too low for a useful top-view, so the lane-segmentation head runs directly on
+the raw lane image.
 
 Uses the vendored jetcam wrapper from
-  /home/hyunseo/Personal_Research/AUE4040/calibration/camera
+  /home/ircv16/team/calibration/camera
 (matches the path that record_and_label.ipynb / main/rover_stereo use).
 
 Each camera runs its own reader thread; the timer publishes the latest frame
@@ -28,21 +32,21 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 
-sys.path.insert(0, "/home/hyunseo/Personal_Research/AUE4040")
+sys.path.insert(0, "/home/ircv16/team")
 from calibration.camera import Camera  # noqa: E402
 
 
 class CameraNode(Node):
     def __init__(self) -> None:
         super().__init__("rover_camera")
-        self.declare_parameter("bev_sensor_id", 0)
+        self.declare_parameter("lane_sensor_id", 0)
         self.declare_parameter("front_sensor_id", 1)
         self.declare_parameter("cam_width", 1280)
         self.declare_parameter("cam_height", 720)
         self.declare_parameter("fps", 15)
         self.declare_parameter("jpeg_quality", 85)
 
-        bev_id   = int(self.get_parameter("bev_sensor_id").value)
+        lane_id  = int(self.get_parameter("lane_sensor_id").value)
         front_id = int(self.get_parameter("front_sensor_id").value)
         w        = int(self.get_parameter("cam_width").value)
         h        = int(self.get_parameter("cam_height").value)
@@ -50,19 +54,19 @@ class CameraNode(Node):
         self.jpeg_q = int(self.get_parameter("jpeg_quality").value)
 
         # capture_fps is set 2x publish fps so jetcam's internal buffer is fresh.
-        self.cam_bev   = Camera(sensor_id=bev_id,   capture_width=w, capture_height=h, capture_fps=fps * 2)
+        self.cam_lane  = Camera(sensor_id=lane_id,  capture_width=w, capture_height=h, capture_fps=fps * 2)
         self.cam_front = Camera(sensor_id=front_id, capture_width=w, capture_height=h, capture_fps=fps * 2)
         self.get_logger().info(
-            f"cameras up bev(sensor_id={bev_id})={self.cam_bev.running()} "
+            f"cameras up lane(sensor_id={lane_id})={self.cam_lane.running()} "
             f"front(sensor_id={front_id})={self.cam_front.running()}"
         )
 
-        self._latest: dict[str, np.ndarray | None] = {"bev": None, "front": None}
+        self._latest: dict[str, np.ndarray | None] = {"lane": None, "front": None}
         self._stop = False
-        for cam, key in [(self.cam_bev, "bev"), (self.cam_front, "front")]:
+        for cam, key in [(self.cam_lane, "lane"), (self.cam_front, "front")]:
             threading.Thread(target=self._reader, args=(cam, key), daemon=True).start()
 
-        self.pub_bev   = self.create_publisher(CompressedImage, "/bev_image/compressed",   10)
+        self.pub_lane  = self.create_publisher(CompressedImage, "/lane_image/compressed",  10)
         self.pub_front = self.create_publisher(CompressedImage, "/front_image/compressed", 10)
         self.timer = self.create_timer(1.0 / fps, self._tick)
         self._tick_i = 0
@@ -89,7 +93,7 @@ class CameraNode(Node):
 
     def _tick(self) -> None:
         self._tick_i += 1
-        for key, pub, frame_id in [("bev",   self.pub_bev,   "bev_camera"),
+        for key, pub, frame_id in [("lane",  self.pub_lane,  "lane_camera"),
                                    ("front", self.pub_front, "front_camera")]:
             frame = self._latest[key]
             if frame is None:
@@ -99,14 +103,14 @@ class CameraNode(Node):
             pub.publish(msg)
         if self._tick_i % 30 == 0:
             self.get_logger().info(
-                f"published bev={self._latest['bev'] is not None} "
+                f"published lane={self._latest['lane'] is not None} "
                 f"front={self._latest['front'] is not None}"
             )
 
     def destroy_node(self) -> bool:
         self._stop = True
         time.sleep(0.2)
-        for cam in (self.cam_bev, self.cam_front):
+        for cam in (self.cam_lane, self.cam_front):
             try: cam.stop()
             except Exception: pass
             try: cam._cam.cap.release()

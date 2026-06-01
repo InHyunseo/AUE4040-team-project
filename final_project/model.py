@@ -4,10 +4,10 @@ AUE4040 자동차임베디드AI — E2E 자율주행 네트워크 (차선 주행
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 전체 파이프라인에서 이 네트워크의 위치
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  BEV 카메라
+  Lane 카메라 (sensor 0)
     → SegFormer (별도 fine-tuning 후 freeze)
     → 차선 마스크 오버레이 이미지 생성 (좌실선 / 우실선 / 중앙점선)
-    → [BEVEncoder] ← 이 파일에서 학습
+    → [LaneEncoder] ← 이 파일에서 학습
 
   Front 카메라
     → YOLO (별도 fine-tuning 후 freeze, 단일 클래스: car)
@@ -20,11 +20,11 @@ AUE4040 자동차임베디드AI — E2E 자율주행 네트워크 (차선 주행
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 입력
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  bev_img    (B, 3, 224, 224)  SegFormer 차선 마스크 오버레이된 BEV 이미지
+  lane_img    (B, 3, 224, 224)  SegFormer 차선 마스크 오버레이된 Lane 이미지
   front_img  (B, 3, 224, 224)  YOLO 차량 bbox 오버레이된 Front 이미지
 
   FSM 스칼라 없음. 과거 cmd_vel 없음.
-  BEV 이미지만으로 코너링 중인지/직선인지 판단 가능하므로 시간적 입력 불필요.
+  Lane 이미지만으로 코너링 중인지/직선인지 판단 가능하므로 시간적 입력 불필요.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 출력
@@ -41,7 +41,7 @@ waypoint가 "보조 출력"인 이유
   - 같은 이미지에서 정지 차량을 "추월할지/멈출지" 같은 멀티스텝 의도가 충돌할 때,
     궤적 GT가 공유 feature를 의도 표현 쪽으로 밀어줘서 steer/throttle 일반화를 돕는다.
   - 추론(실주행) 시에는 waypoint 출력을 그냥 쓰지 않으면 된다 (자동으로 버려짐).
-    디버깅/시연 때만 BEV 위에 그려서 모델 의도를 시각화.
+    디버깅/시연 때만 Lane 이미지 위에 그려서 모델 의도를 시각화.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 학습 전략 요약
@@ -72,14 +72,14 @@ from torchvision.models import resnet18, ResNet18_Weights
 WP_N = 5
 
 
-class BEVEncoder(nn.Module):
+class LaneEncoder(nn.Module):
     """
-    ResNet18-A — BEV 이미지 전용 인코더
+    ResNet18-A — Lane 이미지 전용 인코더
 
-    입력: SegFormer가 차선 마스크를 오버레이한 BEV 이미지 (B, 3, 224, 224)
+    입력: SegFormer가 차선 마스크를 오버레이한 Lane 이미지 (B, 3, 224, 224)
           - 좌실선 / 우실선 / 중앙점선을 색상으로 구별해서 오버레이
           - 차선 곡률이 이미지에 그대로 나타나므로 코너링 여부를 모델이 직접 읽음
-    출력: bev_feat (B, 256)
+    출력: lane_feat (B, 256)
 
     학습: ImageNet pretrained 재사용, freeze 없이 전체 학습
           SegFormer는 이미 freeze되어 있으므로 gradient 경로 불균형 없음
@@ -142,7 +142,7 @@ class ControlHead(nn.Module):
     """
     concat feature → steer, throttle  (메인 출력)
 
-    입력: concat(bev_feat, front_feat) = 256 + 256 = 512
+    입력: concat(lane_feat, front_feat) = 256 + 256 = 512
     출력: steer (B,), throttle (B,)  ∈ [-1, 1]
 
     정규화: BatchNorm1d (FC 레이어 간 internal covariate shift 방지)
@@ -187,7 +187,7 @@ class WaypointHead(nn.Module):
     """
     concat feature → waypoints (5점)  (보조 출력)
 
-    입력: concat(bev_feat, front_feat) = 512  (ControlHead와 동일 feature 공유)
+    입력: concat(lane_feat, front_feat) = 512  (ControlHead와 동일 feature 공유)
     출력: waypoints (B, 5, 2)  meters, 로봇 프레임 (x_forward, y_left)
 
     ControlHead와 동일한 구조를 미러하되:
@@ -230,14 +230,14 @@ class E2ENet(nn.Module):
     전체 E2E 네트워크
 
     구조:
-      BEVEncoder(bev_img)       → bev_feat   (B, 256)
+      LaneEncoder(lane_img)       → lane_feat   (B, 256)
       FrontEncoder(front_img)   → front_feat (B, 256)
                                    concat     (B, 512)
       ControlHead(combined)     → steer, throttle
       WaypointHead(combined)    → waypoints (B, 5, 2)
 
     gradient 흐름:
-      loss.backward() 한 번으로 BEVEncoder, FrontEncoder, ControlHead,
+      loss.backward() 한 번으로 LaneEncoder, FrontEncoder, ControlHead,
       WaypointHead 전체 동시 업데이트.
       ControlHead와 WaypointHead가 같은 512-dim feature를 공유하므로
       보조 task(waypoint)가 backbone을 의도 표현 쪽으로 regularize.
@@ -245,16 +245,16 @@ class E2ENet(nn.Module):
     """
     def __init__(self):
         super().__init__()
-        self.bev_encoder   = BEVEncoder()
+        self.lane_encoder   = LaneEncoder()
         self.front_encoder = FrontEncoder()
         self.control_head  = ControlHead()
         self.waypoint_head = WaypointHead()
 
-    def forward(self, bev_img, front_img):
-        bev_feat   = self.bev_encoder(bev_img)       # (B, 256)
+    def forward(self, lane_img, front_img):
+        lane_feat   = self.lane_encoder(lane_img)       # (B, 256)
         front_feat = self.front_encoder(front_img)   # (B, 256)
 
-        combined = torch.cat([bev_feat, front_feat], dim=1)  # (B, 512)
+        combined = torch.cat([lane_feat, front_feat], dim=1)  # (B, 512)
 
         ctrl      = self.control_head(combined)      # (B, 2)
         steer     = ctrl[:, 0]                       # (B,)
@@ -303,10 +303,10 @@ if __name__ == "__main__":
     print(f"학습 파라미터:  {trainable:,}")
 
     B = 4
-    bev_img   = torch.randn(B, 3, 224, 224)
+    lane_img   = torch.randn(B, 3, 224, 224)
     front_img = torch.randn(B, 3, 224, 224)
 
-    steer, throttle, wp = model(bev_img, front_img)
+    steer, throttle, wp = model(lane_img, front_img)
     print(f"steer:     {tuple(steer.shape)}  {steer.min().item():.3f} ~ {steer.max().item():.3f}")
     print(f"throttle:  {tuple(throttle.shape)}  {throttle.min().item():.3f} ~ {throttle.max().item():.3f}")
     print(f"waypoints: {tuple(wp.shape)}  {wp.min().item():.3f} ~ {wp.max().item():.3f}")

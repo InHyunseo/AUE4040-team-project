@@ -1,7 +1,7 @@
 """Start/stop `ros2 bag record` on /record_enable edges.
 
 Topic schema is locked by final_project/data_pipeline/extract_labels.py:
-  /bev_image/compressed     sensor_msgs/CompressedImage
+  /lane_image/compressed    sensor_msgs/CompressedImage
   /front_image/compressed   sensor_msgs/CompressedImage
   /cmd_vel                  geometry_msgs/Twist
 Plus side-channel we want available later:
@@ -10,7 +10,7 @@ Plus side-channel we want available later:
 The bag goes to <out_root>/<session>_<ts>/bag/  so it lines up with the path
 extract_labels.py expects (`--bag <session_dir>/bag`).
 
-The recorder subscribes to /bev_image/compressed for a side-effect: if no
+The recorder subscribes to /lane_image/compressed for a side-effect: if no
 camera frames arrive within `require_frames_within` seconds after start, it
 logs a loud error AND stops the bag — exactly the "no images = fail loud"
 behavior you wanted. No silent jpg fallback.
@@ -31,7 +31,7 @@ from std_msgs.msg import Bool
 
 
 DEFAULT_TOPICS = [
-    "/bev_image/compressed",
+    "/lane_image/compressed",
     "/front_image/compressed",
     "/cmd_vel",
     "/steer_level",
@@ -58,19 +58,19 @@ class BagRecorderNode(Node):
         self._proc: subprocess.Popen | None = None
         self._session_dir: Path | None = None
         self._bag_started_at: float | None = None
-        self._got_bev_after_start = False
+        self._got_lane_after_start = False
 
         self.create_subscription(Bool, "/record_enable", self._on_toggle, 10)
-        self.create_subscription(CompressedImage, "/bev_image/compressed",
-                                 self._on_bev, 10)
+        self.create_subscription(CompressedImage, "/lane_image/compressed",
+                                 self._on_lane, 10)
         self.create_timer(1.0, self._watchdog)
         self.get_logger().info(
             f"waiting on /record_enable.  topics={self.topics}  out_root={self.out_root}"
         )
 
-    def _on_bev(self, _msg: CompressedImage) -> None:
+    def _on_lane(self, _msg: CompressedImage) -> None:
         if self._proc is not None:
-            self._got_bev_after_start = True
+            self._got_lane_after_start = True
 
     def _on_toggle(self, msg: Bool) -> None:
         if msg.data and self._proc is None:
@@ -93,7 +93,7 @@ class BagRecorderNode(Node):
             preexec_fn=os.setsid,
         )
         self._bag_started_at = time.time()
-        self._got_bev_after_start = False
+        self._got_lane_after_start = False
 
     def _stop(self) -> None:
         p = self._proc
@@ -109,7 +109,7 @@ class BagRecorderNode(Node):
         self._proc = None
         self._bag_started_at = None
         self._session_dir = None
-        self._got_bev_after_start = False
+        self._got_lane_after_start = False
 
     def _watchdog(self) -> None:
         if self._proc is None or self._bag_started_at is None:
@@ -122,9 +122,9 @@ class BagRecorderNode(Node):
             self._bag_started_at = None
             return
         elapsed = time.time() - self._bag_started_at
-        if (not self._got_bev_after_start) and elapsed > self.frame_deadline_s:
+        if (not self._got_lane_after_start) and elapsed > self.frame_deadline_s:
             self.get_logger().error(
-                f"NO /bev_image/compressed frames seen in {elapsed:.1f}s after bag start. "
+                f"NO /lane_image/compressed frames seen in {elapsed:.1f}s after bag start. "
                 "Is rover_camera running?  Stopping bag to avoid junk data."
             )
             self._stop()

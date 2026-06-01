@@ -24,3 +24,5 @@ logs/
 *.onnx
 *.engine
 *.cache
+final_project/rover_data/*
+!final_project/rover_data/.gitkeep

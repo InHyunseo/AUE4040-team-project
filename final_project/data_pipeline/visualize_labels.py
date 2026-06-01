@@ -20,9 +20,12 @@ SEG_COLORS = [(0, 0, 255),     # left-solid    - red
               (0, 255, 0),     # right-solid   - green
               (255, 0, 0)]     # center-dashed - blue
 
+# Display-only scale for drawing metric waypoints (labels are in meters).
+DEBUG_PPM = 200.0
 
-def overlay_seg(bev: np.ndarray, seg: np.ndarray) -> np.ndarray:
-    out = bev.copy()
+
+def overlay_seg(lane: np.ndarray, seg: np.ndarray) -> np.ndarray:
+    out = lane.copy()
     for c in range(len(SEG_COLORS)):
         m = seg[c] > 0
         if not m.any():
@@ -31,15 +34,15 @@ def overlay_seg(bev: np.ndarray, seg: np.ndarray) -> np.ndarray:
     return out
 
 
-def draw_waypoints(bev: np.ndarray, wps: np.ndarray, ppm: float) -> np.ndarray:
-    H, W = bev.shape[:2]
+def draw_waypoints(lane: np.ndarray, wps: np.ndarray, ppm: float) -> np.ndarray:
+    H, W = lane.shape[:2]
     ox, oy = W // 2, H - H // 8
     pts = []
     for (x_m, y_m) in wps:
         u = int(ox - y_m * ppm)   # +y_m (left) -> -u
         v = int(oy - x_m * ppm)   # +x_m (forward) -> -v
         pts.append((u, v))
-    out = bev.copy()
+    out = lane.copy()
     cv2.circle(out, (ox, oy), 4, (255, 255, 255), 1)
     for i, (u, v) in enumerate(pts):
         cv2.circle(out, (u, v), 4, (255, 255, 255), -1)
@@ -73,32 +76,31 @@ def main():
     args = ap.parse_args()
 
     with h5py.File(args.cache, "r") as h5:
-        n = h5["bev"].shape[0]
+        n = h5["lane"].shape[0]
         if not (0 <= args.idx < n):
             raise IndexError(f"idx {args.idx} out of range [0,{n})")
-        bev = h5["bev"][args.idx]
+        lane = h5["lane"][args.idx]
         front = h5["front"][args.idx]
         seg = h5["seg"][args.idx]
         det = h5["det"][args.idx]
         wps = h5["waypoint"][args.idx]
         steer = float(h5["steer"][args.idx])
         thr = float(h5["throttle"][args.idx])
-        ppm = float(h5.attrs["pixels_per_meter"])
 
-    bev_vis = draw_waypoints(overlay_seg(bev, seg), wps, ppm)
+    lane_vis = draw_waypoints(overlay_seg(lane, seg), wps, DEBUG_PPM)
     front_vis = draw_bbox(front, det)
 
     # match heights
-    if bev_vis.shape[0] != front_vis.shape[0]:
-        h = max(bev_vis.shape[0], front_vis.shape[0])
+    if lane_vis.shape[0] != front_vis.shape[0]:
+        h = max(lane_vis.shape[0], front_vis.shape[0])
         def pad(im):
             ph = h - im.shape[0]
             if ph <= 0:
                 return im
             return np.vstack([im, np.zeros((ph, im.shape[1], 3), np.uint8)])
-        bev_vis = pad(bev_vis); front_vis = pad(front_vis)
+        lane_vis = pad(lane_vis); front_vis = pad(front_vis)
 
-    panel = np.hstack([bev_vis, front_vis])
+    panel = np.hstack([lane_vis, front_vis])
     cv2.putText(panel, f"idx={args.idx}  steer(w)={steer:.2f}  throttle(v)={thr:.2f}",
                 (5, panel.shape[0] - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)

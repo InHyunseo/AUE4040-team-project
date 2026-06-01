@@ -1,16 +1,16 @@
 """Generate labels_cache.h5 from a rosbag2 .db3 (차선 주행 + 정지 차량 추월).
 
 Reads three topics:
-  /bev_image/compressed     sensor_msgs/CompressedImage
+  /lane_image/compressed    sensor_msgs/CompressedImage
   /front_image/compressed   sensor_msgs/CompressedImage
   /cmd_vel                  geometry_msgs/Twist (linear.x m/s, angular.z rad/s)
 
-For each BEV frame t, syncs the nearest front frame and the nearest cmd_vel
+For each lane frame t, syncs the nearest front frame and the nearest cmd_vel
 sample (both within ±SYNC_TOL ns), then generates:
 
-  bev        (224,224,3) uint8   warped via calib.M
+  lane       (224,224,3) uint8   raw lane image, resized (no BEV warp)
   front      (224,224,3) uint8   resized
-  seg        (3,224,224) uint8   SegFormer lane masks on BEV plane
+  seg        (3,224,224) uint8   SegFormer lane masks on the raw lane image
                                  ch0=left-solid, ch1=right-solid, ch2=center-dashed
   det        (5,)        float32 [x,y,w,h,conf] on front (pixels, conf in [0,1])
                                  YOLO single-class (car); zeros if no car
@@ -19,10 +19,13 @@ sample (both within ±SYNC_TOL ns), then generates:
   throttle   ()          float32 linear.x  at t
   timestamp_ns int64
 
+BEV warp was dropped: the camera sits too low for a useful top-view, so the
+lane-segmentation head runs directly on the raw lane image. No calib needed.
+
 Runs WITHOUT ROS2 or camera hardware. Pure rosbags + opencv + numpy + h5py
 + transformers (SegFormer) + ultralytics (YOLO).
 
-  python extract_labels.py --bag /path/to/rosbag2_dir --calib ../calib/calib.json \
+  python extract_labels.py --bag /path/to/rosbag2_dir \
       --segformer_ckpt ../models/segformer_lane \
       --yolo_weights ../../main/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
@@ -31,10 +34,10 @@ SegFormer and YOLO are FROZEN: fine-tuned once on small labeled sets (Phase 1),
 then used here for offline label extraction and on-vehicle inference alike.
 
 Overlay contract (training-time transform, must match inference in rover_lane):
-  - BEV overlay fed to BEVEncoder = warped BEV with the 3 seg channels
+  - Lane overlay fed to LaneEncoder = raw lane image with the 3 seg channels
     alpha-blended in color (ch0=red, ch1=green, ch2=blue).
   - Front overlay fed to FrontEncoder = front image with the car bbox drawn.
-  The H5 stores raw bev/front + seg/det separately; the dataloader composites
+  The H5 stores raw lane/front + seg/det separately; the dataloader composites
   the overlays so the exact compositing can be tuned without re-extracting.
 
 NOTE on main/ coupling: this script imports NOTHING from main/. Its only
@@ -59,7 +62,7 @@ from rosbags.highlevel import AnyReader
 
 # -------------------------------------------------------------------- constants
 
-BEV_TOPIC   = "/bev_image/compressed"
+LANE_TOPIC  = "/lane_image/compressed"
 FRONT_TOPIC = "/front_image/compressed"
 CMD_TOPIC   = "/cmd_vel"
 
@@ -68,7 +71,12 @@ WP_HORIZON_S = 0.5
 WP_N         = 5
 WP_DT        = WP_HORIZON_S / WP_N
 
+LANE_SIZE  = (224, 224)       # lane image resized to this (no BEV warp; camera too low)
 FRONT_SIZE = (224, 224)
+
+# Display-only scale for drawing metric waypoints onto the debug image. Does
+# NOT affect stored labels (waypoints are kept in meters, robot frame).
+DEBUG_PPM = 200.0
 
 SEG_N_CLASSES = 3  # 0=left-solid, 1=right-solid, 2=center-dashed (background excluded)
 
@@ -91,24 +99,24 @@ class CmdSample:
 
 
 def load_bag(bag_path: Path):
-    bev, front, cmd = [], [], []
+    lane, front, cmd = [], [], []
     with AnyReader([bag_path]) as reader:
         conns = {c.topic: c for c in reader.connections}
-        missing = [t for t in (BEV_TOPIC, FRONT_TOPIC, CMD_TOPIC) if t not in conns]
+        missing = [t for t in (LANE_TOPIC, FRONT_TOPIC, CMD_TOPIC) if t not in conns]
         if missing:
             raise RuntimeError(f"bag missing topics: {missing}\nfound: {list(conns)}")
         for conn, ts, raw in reader.messages(connections=list(conns.values())):
             msg = reader.deserialize(raw, conn.msgtype)
-            if conn.topic == BEV_TOPIC:
-                bev.append((ts, decode_compressed(msg)))
+            if conn.topic == LANE_TOPIC:
+                lane.append((ts, decode_compressed(msg)))
             elif conn.topic == FRONT_TOPIC:
                 front.append((ts, decode_compressed(msg)))
             elif conn.topic == CMD_TOPIC:
                 cmd.append(CmdSample(ts, float(msg.linear.x), float(msg.angular.z)))
-    bev.sort(key=lambda x: x[0])
+    lane.sort(key=lambda x: x[0])
     front.sort(key=lambda x: x[0])
     cmd.sort(key=lambda c: c.t_ns)
-    return bev, front, cmd
+    return lane, front, cmd
 
 
 def nearest(sorted_ts, t):
@@ -127,7 +135,7 @@ def nearest(sorted_ts, t):
 class SegFormerLaneSeg:
     """Frozen SegFormer lane segmenter (Phase-1 fine-tuned, then frozen).
 
-    Runs on the warped BEV image and returns (3, H, W) uint8 masks in {0,255}:
+    Runs on the raw lane image and returns (3, H, W) uint8 masks in {0,255}:
       ch0 = left-solid, ch1 = right-solid, ch2 = center-dashed.
 
     The fine-tuned checkpoint's id2label is expected to have 4 entries:
@@ -157,13 +165,13 @@ class SegFormerLaneSeg:
     def empty(h: int, w: int) -> np.ndarray:
         return np.zeros((SEG_N_CLASSES, h, w), dtype=np.uint8)
 
-    def __call__(self, bev_bgr: np.ndarray) -> np.ndarray:
-        h, w = bev_bgr.shape[:2]
-        rgb = cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2RGB)
+    def __call__(self, lane_bgr: np.ndarray) -> np.ndarray:
+        h, w = lane_bgr.shape[:2]
+        rgb = cv2.cvtColor(lane_bgr, cv2.COLOR_BGR2RGB)
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         with self.torch.no_grad():
             logits = self.model(**inputs).logits           # (1, C, h', w')
-        # upsample to BEV resolution, then argmax over classes
+        # upsample to lane-image resolution, then argmax over classes
         logits = self.torch.nn.functional.interpolate(
             logits, size=(h, w), mode="bilinear", align_corners=False)
         cls_map = logits.argmax(dim=1)[0].cpu().numpy()     # (h, w), values 0..C-1
@@ -273,20 +281,22 @@ class YoloCarDet:
 # -------------------------------------------------------------------- debug viz
 
 
-def save_debug(path: Path, bev: np.ndarray, front: np.ndarray,
-               seg: np.ndarray, det: np.ndarray, wps: np.ndarray, ppm: float):
+def save_debug(path: Path, lane: np.ndarray, front: np.ndarray,
+               seg: np.ndarray, det: np.ndarray, wps: np.ndarray):
     # ch0=left-solid red, ch1=right-solid green, ch2=center-dashed blue
     colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
-    bev_vis = bev.copy()
+    lane_vis = lane.copy()
     for c in range(SEG_N_CLASSES):
         m = seg[c] > 0
-        bev_vis[m] = (bev_vis[m] * 0.4 + np.array(colors[c]) * 0.6).astype(np.uint8)
-    H, W = bev_vis.shape[:2]
+        lane_vis[m] = (lane_vis[m] * 0.4 + np.array(colors[c]) * 0.6).astype(np.uint8)
+    # Waypoints are stored in meters (robot frame); draw at a fixed display
+    # scale just to eyeball them. Not metrically meaningful without calib.
+    H, W = lane_vis.shape[:2]
     ox, oy = W // 2, H - H // 8
     for (x_m, y_m) in wps:
-        u = int(ox - y_m * ppm)
-        v = int(oy - x_m * ppm)
-        cv2.circle(bev_vis, (u, v), 3, (255, 255, 255), -1)
+        u = int(ox - y_m * DEBUG_PPM)
+        v = int(oy - x_m * DEBUG_PPM)
+        cv2.circle(lane_vis, (u, v), 3, (255, 255, 255), -1)
 
     front_vis = front.copy()
     if det[4] > 0:
@@ -296,7 +306,7 @@ def save_debug(path: Path, bev: np.ndarray, front: np.ndarray,
         cv2.putText(front_vis, f"car {conf:.2f}", (int(x), int(y) - 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    pad = np.hstack([bev_vis, front_vis])
+    pad = np.hstack([lane_vis, front_vis])
     cv2.imwrite(str(path), pad)
 
 
@@ -306,7 +316,6 @@ def save_debug(path: Path, bev: np.ndarray, front: np.ndarray,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bag", required=True, type=Path)
-    ap.add_argument("--calib", required=True, type=Path)
     ap.add_argument("--segformer_ckpt", type=Path, default=None,
                     help="fine-tuned SegFormer lane checkpoint dir (required)")
     ap.add_argument("--yolo_weights", type=Path,
@@ -326,15 +335,12 @@ def main():
             "--segformer_ckpt is required. Fine-tune SegFormer (Phase 1) first, "
             "then pass the checkpoint dir.")
 
-    calib = json.loads(args.calib.read_text())
-    M = np.asarray(calib["M"], dtype=np.float64)
-    bev_w, bev_h = calib["bev_size"]
-    ppm = float(calib["pixels_per_meter"])
+    lane_w, lane_h = LANE_SIZE
 
     print(f"loading bag {args.bag} ...")
-    bev_msgs, front_msgs, cmds = load_bag(args.bag)
-    print(f"  bev={len(bev_msgs)} front={len(front_msgs)} cmd_vel={len(cmds)}")
-    if not bev_msgs or not front_msgs or not cmds:
+    lane_msgs, front_msgs, cmds = load_bag(args.bag)
+    print(f"  lane={len(lane_msgs)} front={len(front_msgs)} cmd_vel={len(cmds)}")
+    if not lane_msgs or not front_msgs or not cmds:
         raise RuntimeError("empty bag for one or more topics")
 
     front_ts = [t for t, _ in front_msgs]
@@ -347,7 +353,7 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.debug_dir.mkdir(parents=True, exist_ok=True)
 
-    n_candidate = len(bev_msgs)
+    n_candidate = len(lane_msgs)
     if args.limit:
         n_candidate = min(n_candidate, args.limit)
     debug_stride = max(1, n_candidate // 100)
@@ -359,9 +365,9 @@ def main():
                 dtype=dtype, chunks=(1,) + shape, compression="gzip",
                 compression_opts=4)
 
-        d_bev   = dset("bev", (bev_h, bev_w, 3), "uint8")
+        d_lane  = dset("lane", (lane_h, lane_w, 3), "uint8")
         d_front = dset("front", (FRONT_SIZE[1], FRONT_SIZE[0], 3), "uint8")
-        d_seg   = dset("seg", (SEG_N_CLASSES, bev_h, bev_w), "uint8")
+        d_seg   = dset("seg", (SEG_N_CLASSES, lane_h, lane_w), "uint8")
         d_det   = dset("det", (5,), "float32")
         d_wp    = dset("waypoint", (WP_N, 2), "float32")
         d_steer = dset("steer", (), "float32")
@@ -369,7 +375,7 @@ def main():
         d_ts    = dset("timestamp_ns", (), "int64")
 
         kept = 0
-        for i, (t_ns, bev_src) in enumerate(bev_msgs[:n_candidate]):
+        for i, (t_ns, lane_src) in enumerate(lane_msgs[:n_candidate]):
             j = nearest(front_ts, t_ns)
             if abs(front_ts[j] - t_ns) > SYNC_TOL_NS:
                 continue
@@ -381,17 +387,17 @@ def main():
             if wps is None:
                 continue
 
-            bev = cv2.warpPerspective(bev_src, M, (bev_w, bev_h))
+            lane = cv2.resize(lane_src, LANE_SIZE)
             front = cv2.resize(front_msgs[j][1], FRONT_SIZE)
-            seg = segmenter(bev)
+            seg = segmenter(lane)
             det_arr = det(front) if det is not None else YoloCarDet.empty()
 
             v = cmds[ci].v
             w = cmds[ci].w
 
-            for d in (d_bev, d_front, d_seg, d_det, d_wp, d_steer, d_thr, d_ts):
+            for d in (d_lane, d_front, d_seg, d_det, d_wp, d_steer, d_thr, d_ts):
                 d.resize(kept + 1, axis=0)
-            d_bev[kept] = bev
+            d_lane[kept] = lane
             d_front[kept] = front
             d_seg[kept] = seg
             d_det[kept] = det_arr
@@ -402,14 +408,13 @@ def main():
 
             if kept % debug_stride == 0:
                 save_debug(args.debug_dir / f"frame_{kept:05d}.png",
-                           bev, front, seg, det_arr, wps, ppm)
+                           lane, front, seg, det_arr, wps)
 
             kept += 1
             if kept % 50 == 0:
                 print(f"  kept {kept}/{i+1}")
 
-        h5.attrs["pixels_per_meter"] = ppm
-        h5.attrs["bev_size"] = [bev_w, bev_h]
+        h5.attrs["lane_size"] = [lane_w, lane_h]
         h5.attrs["wp_horizon_s"] = WP_HORIZON_S
         h5.attrs["wp_n"] = WP_N
         h5.attrs["seg_n_classes"] = SEG_N_CLASSES
