@@ -1,9 +1,10 @@
 """1D steering-level teleop (SSH-friendly, no X display required).
 
 Implements README/CHECKLIST spec:
-  turn_level ∈ {-5..+5}, throttle coupled to |turn_level|.
+  turn_level ∈ {-2..+2}, throttle coupled to |turn_level|.
   level=0: linear.x=-0.15, angular.z=0
-  level=±5: linear.x=-0.25, angular.z=±0.8 (smoothed via approach())
+  level=±2: linear.x=-0.25, angular.z=±0.8 (smoothed via approach())
+  → 좌/우 두 번만 눌러도 최대 회전.
 
 Keys (terminal must be foreground TTY — works over SSH; do NOT pipe):
   a / d         : turn_level -1 / +1
@@ -37,7 +38,7 @@ from std_msgs.msg import Bool, Int8
 BASE_V       = 0.15
 TURN_V       = 0.25
 MAX_OMEGA    = 0.8
-LEVELS       = 5
+LEVELS       = 2   # 좌/우 두 번 누르면 최대 회전 (turn_level ∈ -2..+2)
 SMOOTH_ALPHA = 0.35
 TICK_HZ      = 20.0
 
