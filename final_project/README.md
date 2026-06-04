@@ -25,7 +25,7 @@
 ```
 Lane 카메라 (sensor 0)
   → SegFormer로 차선 세그 (좌실선 / 우실선 / 중앙점선 3클래스)
-  → 색상 오버레이된 raw lane 이미지 (BEV warp 없음 — 카메라가 너무 낮음)
+  → 색상 오버레이된 raw lane 이미지
   → ResNet18-A (LaneEncoder)
 
 Front 카메라 (sensor 1)
@@ -95,7 +95,7 @@ Phase 1 상세는 [PHASE1.md](PHASE1.md) 참고.
 **1D steering level + throttle coupling**.
 
 ```
-turn_level: -5 ~ +5  (a/d 키로 1단계씩 조절)
+turn_level: -2 ~ +2  (a/d 키로 1단계씩 조절, 좌/우 두 번이면 최대 회전)
 직진:  linear.x = -0.15, angular.z = 0.0
 회전:  linear.x = -0.25까지 자동 증가, angular.z = ±0.8
 ```
@@ -105,11 +105,8 @@ turn_level: -5 ~ +5  (a/d 키로 1단계씩 조절)
 | level | linear.x | angular.z |
 |---:|---:|---:|
 | 0 | -0.15 | 0.00 |
-| ±1 | -0.17 | ±0.16 |
-| ±2 | -0.19 | ±0.32 |
-| ±3 | -0.21 | ±0.48 |
-| ±4 | -0.23 | ±0.64 |
-| ±5 | -0.25 | ±0.80 |
+| ±1 | -0.20 | ±0.40 |
+| ±2 | -0.25 | ±0.80 |
 
 smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
 
@@ -130,8 +127,6 @@ smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
      ResNet18×2 + ControlHead + WaypointHead
 6. ONNX export → Jetson에서 trtexec --fp16 (engine은 Jetson에서만 빌드)
 7. rover_lane 노드 교체 → 실차 테스트
-
-(BEV 캘리브레이션 단계는 폐기 — 카메라가 너무 낮아 raw lane 이미지를 그대로 사용)
 ```
 
 ROS2 노드 사용법은 [ros2_ws/README.md](ros2_ws/README.md) 참고.

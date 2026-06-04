@@ -1,7 +1,6 @@
 # ros2_ws — data collection stack
 
-데이터 수집 전용 ROS2 워크스페이스. `main/ros2_ws`(자율주행 본체)와 별도로,
-final_project 전용 노드만 모았다.
+데이터 수집 전용 ROS2 워크스페이스.
 
 ## 패키지
 
@@ -13,8 +12,7 @@ final_project 전용 노드만 모았다.
 | `rover_recorder` | `motor_bridge_node`  | `/cmd_vel` → UART (데이터 수집 전용) |
 | `rover_recorder` | `bag_recorder_node`  | `/record_enable` 토글 시 `ros2 bag record` 자동 시작/종료. lane 프레임 없으면 종료 |
 
-> BEV warp는 폐기했다 — 카메라가 너무 낮아 top-view가 무의미. 두 카메라 모두 raw로
-> 녹화하고, 차선 세그 헤드는 raw lane 이미지 위에서 동작한다. (calib 불필요)
+> 두 카메라 모두 raw로 녹화하고, 차선 세그 헤드는 raw lane 이미지 위에서 동작한다.
 
 ## 토픽 contract
 
@@ -24,7 +22,7 @@ final_project 전용 노드만 모았다.
 /lane_image/compressed   sensor_msgs/CompressedImage  # sensor 0, 차선 세그 헤드
 /front_image/compressed  sensor_msgs/CompressedImage  # sensor 1, 객체인식 헤드
 /cmd_vel                 geometry_msgs/Twist          # linear.x throttle, angular.z steering
-/steer_level             std_msgs/Int8                # -5..+5 raw teleop
+/steer_level             std_msgs/Int8                # -2..+2 raw teleop
 /record_enable           std_msgs/Bool                # bag on/off toggle
 ```
 
@@ -71,7 +69,7 @@ ros2 run rover_teleop teleop_node
 ```
 
 **키 매핑** (teleop_node 터미널에서):
-- `a` / `d` : turn_level −1 / +1 (−5..+5)
+- `a` / `d` : turn_level −1 / +1 (−2..+2, 두 번이면 최대 회전)
 - `space` : 정지 (level=0, drive off)
 - `g` : drive on/off 토글 (UART 송신)
 - `r` : 녹화 on/off 토글 (bag 시작/종료)

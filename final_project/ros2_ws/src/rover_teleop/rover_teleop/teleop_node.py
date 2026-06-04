@@ -1,21 +1,16 @@
-"""1D steering-level teleop (SSH-friendly, no X display required).
+"""1D steering-level teleop. termios cbreak reads keys from the controlling
+TTY, so it works over SSH (no X). Terminal must be a foreground TTY — do NOT pipe.
 
-Implements README/CHECKLIST spec:
-  turn_level ∈ {-2..+2}, throttle coupled to |turn_level|.
-  level=0: linear.x=-0.15, angular.z=0
-  level=±2: linear.x=-0.25, angular.z=±0.8 (smoothed via approach())
-  → 좌/우 두 번만 눌러도 최대 회전.
+  turn_level ∈ {-2..+2}, throttle coupled to |turn_level|, smoothed via approach():
+    level=0:  linear.x=-0.15, angular.z=0
+    level=±2: linear.x=-0.25, angular.z=±0.8   (좌/우 두 번이면 최대 회전)
 
-Keys (terminal must be foreground TTY — works over SSH; do NOT pipe):
+Keys:
   a / d         : turn_level -1 / +1
   space         : level=0, drive off (hard stop)
-  g             : toggle drive on/off  (recording still controlled separately)
-  r             : toggle /record_enable (recorder_node listens to this)
+  g             : toggle drive on/off
+  r             : toggle /record_enable (recorder listens to this)
   q  or  ESC    : quit
-
-pynput would need X. termios cbreak reads keys directly from the controlling
-TTY and works fine inside an SSH session. This pattern matches the existing
-main/ros2_ws/.../scripts/teleop_record.py.
 
 Publishes:
   /cmd_vel        geometry_msgs/Twist        (smoothed)

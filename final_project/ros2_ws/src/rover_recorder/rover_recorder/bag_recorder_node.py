@@ -1,19 +1,17 @@
 """Start/stop `ros2 bag record` on /record_enable edges.
 
-Topic schema is locked by final_project/data_pipeline/extract_labels.py:
+Records the topic schema extract_labels.py expects:
   /lane_image/compressed    sensor_msgs/CompressedImage
   /front_image/compressed   sensor_msgs/CompressedImage
   /cmd_vel                  geometry_msgs/Twist
-Plus side-channel we want available later:
   /steer_level              std_msgs/Int8     (raw teleop input)
 
-The bag goes to <out_root>/<session>_<ts>/bag/  so it lines up with the path
-extract_labels.py expects (`--bag <session_dir>/bag`).
+The bag goes to <out_root>/<session>_<ts>/bag/, matching the path
+extract_labels.py takes (`--bag <session_dir>/bag`).
 
-The recorder subscribes to /lane_image/compressed for a side-effect: if no
-camera frames arrive within `require_frames_within` seconds after start, it
-logs a loud error AND stops the bag — exactly the "no images = fail loud"
-behavior you wanted. No silent jpg fallback.
+Subscribes to /lane_image/compressed as a liveness check: if no camera frames
+arrive within `require_frames_within` seconds after start, it logs an error and
+stops the bag (fail loud rather than record junk).
 """
 from __future__ import annotations
 

@@ -1,15 +1,8 @@
 """Phase-1 라벨링용 jpg 추출 — rosbag → jpg (Lane + Front).
 
-Phase 1은 SegFormer(차선 세그)와 YOLO(car 감지)를 fine-tune하기 위한 소량
-라벨 데이터가 필요하다. 이 스크립트는 수집한 rosbag에서 일정 간격(stride)으로
-프레임을 뽑아 라벨링 툴(Roboflow 등)에 올릴 jpg로 저장한다.
-
-  Lane : (lane_w, lane_h)로 resize한 raw 이미지 (BEV warp 없음 — 카메라가
-         너무 낮아 top-view가 무의미). extract_labels.py가 SegFormer를 돌리는
-         것과 동일한 이미지라 라벨링-학습-추론 좌표계가 일치한다.
-  Front: (224, 224)로 resize한 이미지 (extract_labels.py FRONT_SIZE와 동일).
-
-extract_labels.py의 디코드/로드/상수를 그대로 재사용해 좌표계 drift를 막는다.
+rosbag에서 stride 간격으로 프레임을 뽑아 라벨링 툴(Roboflow)에 올릴 jpg로 저장한다.
+Lane/Front 모두 (224, 224)로 resize — extract_labels.py가 SegFormer/YOLO를 돌리는
+입력과 동일 해상도라 라벨링-학습-추론 좌표계가 일치한다.
 
 사용:
   python extract_for_labeling.py --bag <rosbag_dir> --out ../roboflow_input --stride 15
@@ -18,13 +11,8 @@ extract_labels.py의 디코드/로드/상수를 그대로 재사용해 좌표계
   --target   : lane / front / both (기본 both)
 
 출력:
-  <out>/lane/<bag>_<idx:06d>.jpg
-  <out>/front/<bag>_<idx:06d>.jpg
-
-이 jpg들을 Roboflow에 업로드:
-  - Lane → polygon 세그 라벨 (좌실선 / 우실선 / 중앙점선)
-  - Front→ bbox 라벨 (car)
-그 다음 SegFormer / YOLO fine-tune (YOLO는 main/train_yolo_colab.ipynb 재사용).
+  <out>/lane/<bag>_<idx:06d>.jpg   → Roboflow polygon 세그 (좌실선/우실선/중앙점선)
+  <out>/front/<bag>_<idx:06d>.jpg  → Roboflow bbox (car)
 """
 from __future__ import annotations
 
@@ -33,9 +21,9 @@ from pathlib import Path
 
 import cv2
 
-# extract_labels.py의 contract(토픽/디코드/사이즈)를 그대로 재사용
+# 토픽/디코드/사이즈/크롭은 extract_labels.py 것을 공유 (좌표계 일치)
 from extract_labels import (FRONT_SIZE, FRONT_TOPIC, LANE_SIZE, LANE_TOPIC,
-                            decode_compressed)
+                            crop_lane_roi, decode_compressed)
 from rosbags.highlevel import AnyReader
 
 
@@ -82,7 +70,7 @@ def main():
         out_lane = args.out / "lane"
         out_lane.mkdir(parents=True, exist_ok=True)
         for idx in range(0, len(lane_msgs), args.stride):
-            resized = cv2.resize(lane_msgs[idx][1], LANE_SIZE)
+            resized = cv2.resize(crop_lane_roi(lane_msgs[idx][1]), LANE_SIZE)
             cv2.imwrite(str(out_lane / f"{bag_name}_{idx:06d}.jpg"), resized,
                         [cv2.IMWRITE_JPEG_QUALITY, args.quality])
             n_lane += 1

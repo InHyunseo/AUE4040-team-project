@@ -1,23 +1,14 @@
 """Dual CSI camera publisher.
 
-Publishes:
-  /lane_image/compressed   sensor_msgs/CompressedImage  — lane camera (sensor 0, lane-seg head)
-  /front_image/compressed  sensor_msgs/CompressedImage  — front camera (sensor 1, object-detection head)
-
-Both streams are raw monocular images. BEV warp was dropped — the camera sits
-too low for a useful top-view, so the lane-segmentation head runs directly on
-the raw lane image.
-
-Uses the vendored jetcam wrapper from
-  /home/ircv16/team/calibration/camera
-(matches the path that record_and_label.ipynb / main/rover_stereo use).
+Publishes two raw monocular streams (jetcam wrapper at
+/home/ircv16/team/calibration/camera):
+  /lane_image/compressed   sensor_msgs/CompressedImage  — sensor 0 (lane-seg head)
+  /front_image/compressed  sensor_msgs/CompressedImage  — sensor 1 (object-detection head)
 
 Each camera runs its own reader thread; the timer publishes the latest frame
-at `fps` Hz. JPEG-encoded by OpenCV (quality 85). Color is BGR on the wire
-(after RGB->BGR convert from jetcam).
-
-Distance/stereo is intentionally NOT done here — depth was dropped from the
-final-project pipeline. We need two independent monocular streams.
+at `fps` Hz, JPEG-encoded by OpenCV (quality 85). Color is BGR on the wire —
+we read jetcam's native BGR frame (Camera.read_bgr()) and encode it as-is,
+with no color conversion in the hot path.
 """
 from __future__ import annotations
 
@@ -72,16 +63,18 @@ class CameraNode(Node):
         self._tick_i = 0
 
     def _reader(self, cam: Camera, key: str) -> None:
+        # read_bgr() returns the raw BGR frame straight from jetcam (its
+        # GStreamer pipeline already ends in BGR). We JPEG-encode BGR below,
+        # so reading BGR avoids a wasteful BGR->RGB->BGR round-trip per frame.
         while not self._stop:
             try:
-                f = cam.read()
+                f = cam.read_bgr()
                 if f is not None:
                     self._latest[key] = f
             except Exception:
                 time.sleep(0.01)
 
-    def _encode(self, rgb: np.ndarray) -> CompressedImage:
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    def _encode(self, bgr: np.ndarray) -> CompressedImage:
         ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_q])
         if not ok:
             raise RuntimeError("cv2.imencode failed")

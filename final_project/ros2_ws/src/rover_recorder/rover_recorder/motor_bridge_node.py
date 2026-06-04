@@ -1,16 +1,9 @@
-"""Subscribe /cmd_vel and drive the rover motor over UART.
-
-No FSM gating (vs. main/.../rover_control). Data-collection only —
-teleop_node owns the safety semantics (space = hard stop, drive toggle).
+"""Subscribe /cmd_vel and drive the rover motor over UART (data-collection only;
+teleop_node owns the safety semantics — space = hard stop, drive toggle).
 
 cmd_vel convention (matches teleop_node + extract_labels.py):
   linear.x  : throttle, negative = forward on this rover wiring
-              (record_and_label.ipynb sends state['speed'] straight to
-               base_speed_ctrl with no inversion; we match that)
   angular.z : steering rad/s-ish, ±MAX_OMEGA
-
-Mixing is the same diff-drive formula main/rover_control uses, so the
-trained model's outputs are compatible with the autonomous stack.
 """
 from __future__ import annotations
 
@@ -35,14 +28,13 @@ MAX_OMEGA = 0.8
 
 def mix(linear_x: float, angular_z: float, max_speed: float,
         invert_drive: bool = False) -> tuple[float, float]:
-    """Same shape as main/rover_control.control_node.steer_speed_to_lr but
-    parameterised on angular_z directly (teleop publishes rad/s-ish).
+    """Diff-drive mix: angular_z → L/R wheel speeds.
 
-    teleop convention: forward = negative linear.x.  We turn that into forward
-    drive (L,R same sign as forward) here. `invert_drive` flips the final L/R
-    sign for rovers whose firmware treats positive L/R as reverse — set it so
-    that pressing drive moves the rover *forward*. Steering (a/d) stays correct
-    either way because the flip is applied to both wheels equally."""
+    teleop convention: forward = negative linear.x, turned into forward drive
+    (L,R same sign as forward) here. `invert_drive` flips the final L/R sign for
+    rovers whose firmware treats positive L/R as reverse — set it so pressing
+    drive moves the rover *forward*. Steering (a/d) stays correct either way
+    because the flip is applied to both wheels equally."""
     turn = max(-1.0, min(1.0, angular_z / max(MAX_OMEGA, 1e-6)))
     base = abs(linear_x)
     fwd = -1.0 if linear_x < 0 else (1.0 if linear_x > 0 else 0.0)  # teleop: <0 = forward
@@ -104,6 +96,11 @@ class MotorBridgeNode(Node):
             return
         try:
             self.base.base_speed_ctrl(0.0, 0.0)
+        except Exception:
+            pass
+        # Close the serial port so the UART fd isn't left dangling on shutdown.
+        try:
+            self.base.gimbal_dev_close()
         except Exception:
             pass
 

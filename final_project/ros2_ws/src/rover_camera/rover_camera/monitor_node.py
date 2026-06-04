@@ -1,26 +1,19 @@
 """Browser-based MJPEG monitor for the rover camera streams.
 
-Why a separate web page instead of the notebook ipywidgets viewer?
-  - The notebook viewer does imdecode -> resize -> imencode(q70) in Python on
-    every frame, which adds latency and GIL pressure.
-  - camera_node already publishes JPEG bytes. This node forwards those bytes
-    *as-is* over an MJPEG (multipart/x-mixed-replace) stream, so the browser
-    does the decode natively. Lower display latency, no re-encode.
-  - Either way the monitor is fully independent of the control path
-    (teleop -> /cmd_vel -> motor_bridge -> UART). It never blocks driving.
+Forwards camera_node's JPEG bytes as-is over an MJPEG
+(multipart/x-mixed-replace) stream — the browser decodes natively, so there's
+no re-encode and the monitor never touches the control path.
 
 Serves on http://<host>:<port>/ :
   /            HTML page with all configured streams side by side
   /stream/<k>  multipart/x-mixed-replace MJPEG for stream key <k>
 
-Streams are configured via the `streams` parameter as a list of
-"key:topic" entries. Each topic must be a sensor_msgs/CompressedImage (jpeg).
-Default: lane (sensor 0, lane-seg head) + front (sensor 1, detection head).
-To add lane-seg / detection overlays later, just publish them as
-CompressedImage and add another "key:topic" entry — no code change needed.
+Streams come from the `streams` parameter: a list of "key:topic" entries, each
+a sensor_msgs/CompressedImage (jpeg). Default: lane + front. Add another
+"key:topic" entry to expose more streams — no code change needed.
 
-Default binds 0.0.0.0 so you can open it from a laptop over the same network
-(e.g. http://<jetson-ip>:8080). Set host:=127.0.0.1 to keep it local only.
+Default binds 0.0.0.0 (open from a laptop on the same network). Set
+host:=127.0.0.1 to keep it local only.
 """
 from __future__ import annotations
 

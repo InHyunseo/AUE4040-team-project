@@ -70,6 +70,15 @@ class Camera:
             return None
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+    def read_bgr(self):
+        """Return latest frame as BGR uint8 ndarray (H, W, 3), or None.
+
+        jetcam's GStreamer pipeline already ends in `format=BGR`, so this is
+        the raw frame with no color conversion. Use this when the consumer
+        wants BGR anyway (e.g. cv2.imwrite / cv2.imencode) to avoid a wasteful
+        BGR->RGB->BGR round-trip through read()."""
+        return self._cam.read()
+
     def read_gray(self):
         """Return latest frame as GRAY8 uint8 ndarray (H, W), or None."""
         frame = self._cam.read()

@@ -1,65 +1,18 @@
-"""
-AUE4040 자동차임베디드AI — E2E 자율주행 네트워크 (차선 주행 + 정지 차량 추월)
+"""E2E 자율주행 네트워크 (차선 주행 + 정지 차량 추월).
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-전체 파이프라인에서 이 네트워크의 위치
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Lane 카메라 (sensor 0)
-    → SegFormer (별도 fine-tuning 후 freeze)
-    → 차선 마스크 오버레이 이미지 생성 (좌실선 / 우실선 / 중앙점선)
-    → [LaneEncoder] ← 이 파일에서 학습
-
-  Front 카메라
-    → YOLO (별도 fine-tuning 후 freeze, 단일 클래스: car)
-    → 차량 bbox 오버레이 이미지 생성
-    → [FrontEncoder] ← 이 파일에서 학습
-
-  → [ControlHead]  → steer, throttle      (메인 출력)
-  → [WaypointHead] → waypoints (5점, 0.5s) (보조 출력)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-입력
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  lane_img    (B, 3, 224, 224)  SegFormer 차선 마스크 오버레이된 Lane 이미지
+입력:
+  lane_img   (B, 3, 224, 224)  SegFormer 차선 마스크 오버레이된 Lane 이미지
   front_img  (B, 3, 224, 224)  YOLO 차량 bbox 오버레이된 Front 이미지
-
-  FSM 스칼라 없음. 과거 cmd_vel 없음.
-  Lane 이미지만으로 코너링 중인지/직선인지 판단 가능하므로 시간적 입력 불필요.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-출력
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+출력:
   steer      (B,)      [-1, 1]   → rover_control에서 angular.z로 변환  (메인)
   throttle   (B,)      [-1, 1]   → rover_control에서 linear.x로 변환   (메인)
   waypoints  (B, 5, 2)  meters   로봇 프레임 미래 궤적 (x_forward, y_left)  (보조)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-waypoint가 "보조 출력"인 이유
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  - waypoint는 입력이 아니라 출력. multi-task 보조 head.
-  - GT는 cmd_vel forward-Euler 적분으로 만든 미래 0.5초 궤적 (extract_labels.waypoint_gt).
-  - 같은 이미지에서 정지 차량을 "추월할지/멈출지" 같은 멀티스텝 의도가 충돌할 때,
-    궤적 GT가 공유 feature를 의도 표현 쪽으로 밀어줘서 steer/throttle 일반화를 돕는다.
-  - 추론(실주행) 시에는 waypoint 출력을 그냥 쓰지 않으면 된다 (자동으로 버려짐).
-    디버깅/시연 때만 Lane 이미지 위에 그려서 모델 의도를 시각화.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-학습 전략 요약
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  SegFormer:    트랙 데이터로 차선 세그 fine-tuning → freeze
-                (이 파일과 무관, 전처리 파이프라인에서 처리)
-  YOLO:         트랙 데이터로 차량 인식 fine-tuning → freeze
-                (이 파일과 무관, 전처리 파이프라인에서 처리)
-  ResNet18 A,B: ImageNet pretrained → freeze 없이 처음부터 학습
-  ControlHead:  처음부터 학습
-  WaypointHead: 처음부터 학습 (보조 task)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-throttle GT 분포 (텔레옵 1D steering level 방식 기준)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  직선:  throttle ≈ -0.15, steer ≈ 0.0
-  회전:  throttle ≈ -0.25, steer ≈ ±0.8
-  → 모델이 steer 클수록 throttle 높이는 coupling을 자연스럽게 학습
+구조: LaneEncoder/FrontEncoder(ResNet18×2) → concat → ControlHead + WaypointHead.
+waypoint는 보조 출력(multi-task head): GT는 cmd_vel 적분 궤적(extract_labels.waypoint_gt)
+으로, 공유 feature를 멀티스텝 의도 쪽으로 regularize해 steer/throttle 일반화를 돕는다.
+추론 시에는 사용 안 함(디버깅/시연 때만 시각화). SegFormer/YOLO는 전처리 단계에서
+freeze, ResNet18·헤드는 처음부터 학습.
 """
 
 import torch

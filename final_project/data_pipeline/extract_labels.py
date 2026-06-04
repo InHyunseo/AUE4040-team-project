@@ -8,7 +8,7 @@ Reads three topics:
 For each lane frame t, syncs the nearest front frame and the nearest cmd_vel
 sample (both within ±SYNC_TOL ns), then generates:
 
-  lane       (224,224,3) uint8   raw lane image, resized (no BEV warp)
+  lane       (224,224,3) uint8   raw lane image, resized
   front      (224,224,3) uint8   resized
   seg        (3,224,224) uint8   SegFormer lane masks on the raw lane image
                                  ch0=left-solid, ch1=right-solid, ch2=center-dashed
@@ -19,10 +19,7 @@ sample (both within ±SYNC_TOL ns), then generates:
   throttle   ()          float32 linear.x  at t
   timestamp_ns int64
 
-BEV warp was dropped: the camera sits too low for a useful top-view, so the
-lane-segmentation head runs directly on the raw lane image. No calib needed.
-
-Runs WITHOUT ROS2 or camera hardware. Pure rosbags + opencv + numpy + h5py
+Runs without ROS2 or camera hardware: rosbags + opencv + numpy + h5py
 + transformers (SegFormer) + ultralytics (YOLO).
 
   python extract_labels.py --bag /path/to/rosbag2_dir \
@@ -30,18 +27,10 @@ Runs WITHOUT ROS2 or camera hardware. Pure rosbags + opencv + numpy + h5py
       --yolo_weights ../../main/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
 
-SegFormer and YOLO are FROZEN: fine-tuned once on small labeled sets (Phase 1),
-then used here for offline label extraction and on-vehicle inference alike.
-
-Overlay contract (training-time transform, must match inference in rover_lane):
-  - Lane overlay fed to LaneEncoder = raw lane image with the 3 seg channels
-    alpha-blended in color (ch0=red, ch1=green, ch2=blue).
-  - Front overlay fed to FrontEncoder = front image with the car bbox drawn.
-  The H5 stores raw lane/front + seg/det separately; the dataloader composites
-  the overlays so the exact compositing can be tuned without re-extracting.
-
-NOTE on main/ coupling: this script imports NOTHING from main/. Its only
-contract with main/ is the rosbag topic schema above.
+SegFormer and YOLO are frozen (fine-tuned once in Phase 1). The H5 stores raw
+lane/front + seg/det separately; the dataloader composites the overlays
+(lane: 3 seg channels alpha-blended ch0=red/ch1=green/ch2=blue; front: car
+bbox drawn) so compositing can be tuned without re-extracting.
 """
 
 from __future__ import annotations
@@ -71,8 +60,17 @@ WP_HORIZON_S = 0.5
 WP_N         = 5
 WP_DT        = WP_HORIZON_S / WP_N
 
-LANE_SIZE  = (224, 224)       # lane image resized to this (no BEV warp; camera too low)
+LANE_SIZE  = (224, 224)       # lane image resized to this
 FRONT_SIZE = (224, 224)
+
+# Fraction of the lane image to crop off the TOP before resizing to LANE_SIZE.
+# The lane camera's upper region is off-road background (sky/wall/far scene)
+# with no lane in it; cropping it gives the lanes more vertical resolution and
+# removes background distractors. 0.0 = no crop (current behaviour). Set this
+# from a real bag frame BEFORE labeling (changing it after labeling shifts the
+# coordinate frame and invalidates labels). Only the lane path uses this;
+# front/YOLO is never cropped (cars appear anywhere in frame).
+LANE_CROP_TOP = 0.0
 
 # Display-only scale for drawing metric waypoints onto the debug image. Does
 # NOT affect stored labels (waypoints are kept in meters, robot frame).
@@ -89,6 +87,18 @@ def decode_compressed(msg) -> np.ndarray:
     if img is None:
         raise RuntimeError("cv2.imdecode returned None")
     return img
+
+
+def crop_lane_roi(lane: np.ndarray) -> np.ndarray:
+    """Drop the top LANE_CROP_TOP fraction of the lane image (off-road
+    background). Must run BEFORE the LANE_SIZE resize, identically in every lane
+    path (labeling export, h5 extraction, on-vehicle inference) so the
+    label/train/infer coordinate frames stay aligned. LANE_CROP_TOP=0.0 returns
+    the image unchanged."""
+    if LANE_CROP_TOP <= 0.0:
+        return lane
+    y0 = int(lane.shape[0] * LANE_CROP_TOP)
+    return lane[y0:]
 
 
 @dataclass
@@ -133,18 +143,14 @@ def nearest(sorted_ts, t):
 
 
 class SegFormerLaneSeg:
-    """Frozen SegFormer lane segmenter (Phase-1 fine-tuned, then frozen).
+    """Frozen SegFormer lane segmenter.
 
     Runs on the raw lane image and returns (3, H, W) uint8 masks in {0,255}:
       ch0 = left-solid, ch1 = right-solid, ch2 = center-dashed.
 
-    The fine-tuned checkpoint's id2label is expected to have 4 entries:
-      0=background, 1=left-solid, 2=right-solid, 3=center-dashed
-    (i.e. SEG_N_CLASSES semantic classes + background). The output drops the
-    background channel.
-
-    Lazy heavy imports inside __init__ so the module stays importable without
-    transformers/torch installed.
+    The checkpoint's id2label must have 4 entries:
+      0=background, 1=left-solid, 2=right-solid, 3=center-dashed.
+    The output drops the background channel.
     """
 
     N_CLASSES = SEG_N_CLASSES
@@ -225,19 +231,17 @@ def waypoint_gt(cmds: list[CmdSample], cmd_ts: list[int], t0_ns: int) -> np.ndar
 
 
 class YoloCarDet:
-    """Frozen YOLOv8 (ultralytics best.pt) single-class car detector.
+    """Frozen YOLO (ultralytics best.pt) single-class car detector.
 
-    For OFFLINE label extraction (not the TensorRT runtime used on the rover).
-    __call__ returns the highest-conf car bbox as (5,) [x,y,w,h,conf] in
-    front-image pixels (x,y = top-left), or zeros(5) if no car.
-
-    Keeps bbox AND size so the model learns both position and apparent distance.
-
-    Lazy import of ultralytics inside __init__.
+    Default model is YOLO26 (NMS-free, end-to-end), so no IoU/NMS threshold is
+    used; only the confidence filter applies. __call__ returns the highest-conf
+    car bbox as (5,) [x,y,w,h,conf] in front-image pixels (x,y = top-left), or
+    zeros(5) if no car. Keeps bbox position and size so the model learns
+    position and apparent distance.
     """
 
     def __init__(self, weights_path: str, device: str = "cuda",
-                 imgsz: int = 320, conf: float = 0.25, iou: float = 0.5,
+                 imgsz: int = 320, conf: float = 0.25,
                  car_class: str = "car"):
         from ultralytics import YOLO
 
@@ -245,7 +249,6 @@ class YoloCarDet:
         self.device = device
         self.imgsz = imgsz
         self.conf = conf
-        self.iou = iou
         # resolve the car class id. names is {id: name}. Single-class models
         # accept any detection as a car.
         names = self.model.names
@@ -263,7 +266,7 @@ class YoloCarDet:
 
     def __call__(self, front_bgr: np.ndarray) -> np.ndarray:
         res = self.model.predict(front_bgr, imgsz=self.imgsz, conf=self.conf,
-                                 iou=self.iou, device=self.device, verbose=False)[0]
+                                 device=self.device, verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
             return self.empty()
         cls = res.boxes.cls.cpu().numpy().astype(int)
@@ -387,7 +390,7 @@ def main():
             if wps is None:
                 continue
 
-            lane = cv2.resize(lane_src, LANE_SIZE)
+            lane = cv2.resize(crop_lane_roi(lane_src), LANE_SIZE)
             front = cv2.resize(front_msgs[j][1], FRONT_SIZE)
             seg = segmenter(lane)
             det_arr = det(front) if det is not None else YoloCarDet.empty()
