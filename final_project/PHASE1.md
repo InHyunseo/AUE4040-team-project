@@ -25,11 +25,16 @@ cd /home/ircv16/team/final_project/ros2_ws
 colcon build --symlink-install
 source install/setup.bash
 
-# 터미널 A — 카메라 + 모터 + bag 레코더
+
+# 터미널 A — 카메라 + 모터 + bag 레코더 http://192.168.0.123:8080/
+cd /home/ircv16/team/final_project/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
 ros2 launch rover_recorder record.launch.py session_name:=phase1
 
+
 # 터미널 B — 키보드 텔레옵 (별도 TTY)
-cd final_project/ros2_ws && source install/setup.bash
+cd /home/ircv16/team/final_project/ros2_ws && source install/setup.bash
 ros2 run rover_teleop teleop_node
 ```
 
@@ -47,7 +52,7 @@ ros2 run rover_teleop teleop_node
 ```bash
 cd final_project/data_pipeline
 python3 extract_for_labeling.py \
-    --bag ../rover_data/phase1_<ts>/bag \
+    --bag ../rover_data/phase1_20260604_164551/bag \
     --out ../roboflow_input \
     --stride 15
 #  → roboflow_input/lane/<bag>_<idx>.jpg   (224x224 raw lane, SegFormer용)

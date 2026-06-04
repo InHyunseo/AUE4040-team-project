@@ -25,12 +25,16 @@ import cv2
 from extract_labels import (FRONT_SIZE, FRONT_TOPIC, LANE_SIZE, LANE_TOPIC,
                             crop_lane_roi, decode_compressed)
 from rosbags.highlevel import AnyReader
+from rosbags.typesys import Stores, get_typestore
+
+
+TYPESTORE = get_typestore(Stores.ROS2_HUMBLE)
 
 
 def load_images_only(bag_path: Path):
     """Lane/Front 이미지만 timestamp순으로 로드 (cmd_vel은 라벨링에 불필요)."""
     lane, front = [], []
-    with AnyReader([bag_path]) as reader:
+    with AnyReader([bag_path], default_typestore=TYPESTORE) as reader:
         conns = {c.topic: c for c in reader.connections}
         missing = [t for t in (LANE_TOPIC, FRONT_TOPIC) if t not in conns]
         if missing:

@@ -23,7 +23,13 @@ else:
     _IMPORT_ERR = None
 
 
-MAX_OMEGA = 0.8
+MAX_OMEGA = 1.2
+# Steering shape (see mix()): STEER_GAIN scales the L/R gap. At 1.0 the inside
+# wheel reaches exactly 0 at full lock (level 2 pivots in place), while level 1
+# keeps some inside-wheel drive. MIN_INNER floors the inside wheel; set to 0 so
+# the full-lock pivot is preserved.
+STEER_GAIN = 1.0
+MIN_INNER = 0.0
 
 
 def mix(linear_x: float, angular_z: float, max_speed: float,
@@ -38,8 +44,16 @@ def mix(linear_x: float, angular_z: float, max_speed: float,
     turn = max(-1.0, min(1.0, angular_z / max(MAX_OMEGA, 1e-6)))
     base = abs(linear_x)
     fwd = -1.0 if linear_x < 0 else (1.0 if linear_x > 0 else 0.0)  # teleop: <0 = forward
-    L = fwd * base * max(0.0, 1.0 - turn)
-    R = fwd * base * max(0.0, 1.0 + turn)
+    # STEER_GAIN widens the gap; the inside wheel is floored at MIN_INNER so a
+    # full-lock turn keeps rolling instead of pivoting (inside wheel hitting 0).
+    # Match the original L/R orientation: turn>0 (right) makes the LEFT wheel the
+    # inside one. STEER_GAIN widens the gap; the inside wheel is floored at
+    # MIN_INNER so a full-lock turn keeps rolling instead of pivoting.
+    g = max(-1.0, min(1.0, turn * STEER_GAIN))
+    left_factor  = max(MIN_INNER, 1.0 - g) if g >= 0 else (1.0 - g)
+    right_factor = (1.0 + g) if g >= 0 else max(MIN_INNER, 1.0 + g)
+    L = fwd * base * left_factor
+    R = fwd * base * right_factor
     if invert_drive:
         L, R = -L, -R
     L = max(-max_speed, min(max_speed, L))

@@ -3,7 +3,7 @@ TTY, so it works over SSH (no X). Terminal must be a foreground TTY — do NOT p
 
   turn_level ∈ {-2..+2}, throttle coupled to |turn_level|, smoothed via approach():
     level=0:  linear.x=-0.15, angular.z=0
-    level=±2: linear.x=-0.25, angular.z=±0.8   (좌/우 두 번이면 최대 회전)
+    level=±2: linear.x=-0.25, angular.z=±1.2   (좌/우 두 번이면 최대 회전)
 
 Keys:
   a / d         : turn_level -1 / +1
@@ -32,10 +32,15 @@ from std_msgs.msg import Bool, Int8
 
 BASE_V       = 0.15
 TURN_V       = 0.25
-MAX_OMEGA    = 0.8
+MAX_OMEGA    = 1.2
 LEVELS       = 2   # 좌/우 두 번 누르면 최대 회전 (turn_level ∈ -2..+2)
 SMOOTH_ALPHA = 0.35
 TICK_HZ      = 20.0
+
+# Per-|level| steering fraction (0..1). lv1 sits close to lv2 so it's a slightly
+# softer version of the full turn rather than a much weaker one.
+#   index 0 = level 0, 1 = level 1, 2 = level 2(max)
+TURN_FRAC    = (0.0, 0.8, 1.0)
 
 
 def approach(cur: float, target: float, alpha: float) -> float:
@@ -91,10 +96,10 @@ class TeleopNode(Node):
     def _target(self) -> tuple[float, float]:
         if not self.driving:
             return 0.0, 0.0
-        turn = self.turn_level / float(LEVELS)
-        a = abs(turn)
+        sign = 1.0 if self.turn_level >= 0 else -1.0
+        a = TURN_FRAC[abs(self.turn_level)]   # steering fraction for this level
         lin = -(BASE_V + a * (TURN_V - BASE_V))
-        ang = turn * MAX_OMEGA
+        ang = sign * a * MAX_OMEGA
         return lin, ang
 
     def _handle_keys(self) -> bool:
