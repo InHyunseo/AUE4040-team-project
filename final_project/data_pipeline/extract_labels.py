@@ -70,7 +70,7 @@ FRONT_SIZE = (224, 224)
 # from a real bag frame BEFORE labeling (changing it after labeling shifts the
 # coordinate frame and invalidates labels). Only the lane path uses this;
 # front/YOLO is never cropped (cars appear anywhere in frame).
-LANE_CROP_TOP = 0.0
+LANE_CROP_TOP = 0.30
 
 # Display-only scale for drawing metric waypoints onto the debug image. Does
 # NOT affect stored labels (waypoints are kept in meters, robot frame).
