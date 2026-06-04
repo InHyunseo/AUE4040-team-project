@@ -21,6 +21,10 @@
 ## 1단계 — rosbag 주행 영상 수집
 
 ```bash
+cd /home/ircv16/team/final_project/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+
 # 터미널 A — 카메라 + 모터 + bag 레코더
 ros2 launch rover_recorder record.launch.py session_name:=phase1
 
