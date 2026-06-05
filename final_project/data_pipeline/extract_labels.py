@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+from enum import IntEnum
 import json
 import math
 from dataclasses import dataclass
@@ -164,7 +165,15 @@ class SegFormerLaneSeg:
         try:
             from PIL import Image
             if not hasattr(Image, "Resampling"):
-                Image.Resampling = Image
+                class _Resampling(IntEnum):
+                    NEAREST = Image.NEAREST
+                    BOX = getattr(Image, "BOX", Image.NEAREST)
+                    BILINEAR = Image.BILINEAR
+                    HAMMING = getattr(Image, "HAMMING", Image.BILINEAR)
+                    BICUBIC = Image.BICUBIC
+                    LANCZOS = Image.LANCZOS
+
+                Image.Resampling = _Resampling
         except ImportError:
             pass
 
