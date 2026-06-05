@@ -158,8 +158,16 @@ class SegFormerLaneSeg:
     N_CLASSES = SEG_N_CLASSES
 
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
-        from transformers import (SegformerForSemanticSegmentation,
-                                  SegformerImageProcessor)
+        try:
+            from transformers.models.segformer.image_processing_segformer import (
+                SegformerImageProcessor,
+            )
+            from transformers.models.segformer.modeling_segformer import (
+                SegformerForSemanticSegmentation,
+            )
+        except ImportError:
+            from transformers import (SegformerForSemanticSegmentation,
+                                      SegformerImageProcessor)
         import torch
 
         self.torch = torch

@@ -123,6 +123,8 @@ class OverlayVizNode(Node):
 
         self.segmenter = None
         self.detector = None
+        self._seg_status = "seg loading"
+        self._det_status = "det loading"
 
         fps = max(0.1, float(self.get_parameter("viz_fps").value))
         self.timer = self.create_timer(1.0 / fps, self._tick)
@@ -139,6 +141,8 @@ class OverlayVizNode(Node):
         if major >= 2:
             self.enable_seg = False
             self.enable_det = False
+            self._seg_status = "seg numpy 2.x"
+            self._det_status = "det numpy 2.x"
             self.get_logger().error(
                 "NumPy 2.x is installed, but Jetson PyTorch wheels are usually "
                 "built against NumPy 1.x. Publishing raw preview fallbacks only. "
@@ -157,8 +161,10 @@ class OverlayVizNode(Node):
         if missing:
             if "torch" in missing or "transformers" in missing:
                 self.enable_seg = False
+                self._seg_status = "seg missing deps"
             if "ultralytics" in missing:
                 self.enable_det = False
+                self._det_status = "det missing deps"
             self.get_logger().error(
                 "missing overlay runtime package(s): "
                 + ", ".join(sorted(set(missing)))
@@ -179,8 +185,10 @@ class OverlayVizNode(Node):
                     raise RuntimeError(f"SegFormer checkpoint not found: {seg_ckpt}")
                 self.get_logger().info(f"loading SegFormer from {seg_ckpt} on {device}")
                 self.segmenter = SegFormerLaneSeg(str(seg_ckpt), device=device)
+                self._seg_status = "seg ready"
             except Exception as exc:
                 self.segmenter = None
+                self._seg_status = _short_status("seg", exc)
                 self.get_logger().error(
                     "SegFormer unavailable; /lane_seg/compressed will publish "
                     f"resized raw lane frames. reason: {exc}"
@@ -196,8 +204,10 @@ class OverlayVizNode(Node):
                 self.detector = YoloCarDet(
                     str(yolo_weights), device=device, imgsz=imgsz, conf=conf
                 )
+                self._det_status = "det ready"
             except Exception as exc:
                 self.detector = None
+                self._det_status = _short_status("det", exc)
                 self.get_logger().error(
                     "YOLO unavailable; /front_det/compressed will publish "
                     f"resized raw front frames. reason: {exc}"
@@ -236,7 +246,7 @@ class OverlayVizNode(Node):
     def _process_lane(self, msg: CompressedImage) -> CompressedImage:
         lane = cv2.resize(crop_lane_roi(_decode_jpeg(msg)), LANE_SIZE)
         if self.segmenter is None:
-            _put_status(lane, "seg unavailable")
+            _put_status(lane, self._seg_status)
             return self._encode(lane, msg)
         seg = self.segmenter(lane)
         overlay = _overlay_seg(lane, seg, self.seg_alpha)
@@ -245,7 +255,7 @@ class OverlayVizNode(Node):
     def _process_front(self, msg: CompressedImage) -> CompressedImage:
         front = cv2.resize(_decode_jpeg(msg), FRONT_SIZE)
         if self.detector is None:
-            _put_status(front, "det unavailable")
+            _put_status(front, self._det_status)
             return self._encode(front, msg)
         det = self.detector(front)
         overlay = _overlay_det(front, det)
@@ -308,6 +318,13 @@ def _put_status(img: np.ndarray, text: str) -> None:
         (0, 0, 255),
         1,
     )
+
+
+def _short_status(prefix: str, exc: Exception) -> str:
+    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+    if len(msg) > 36:
+        msg = msg[:33] + "..."
+    return f"{prefix} {msg}"
 
 
 def main() -> None:
