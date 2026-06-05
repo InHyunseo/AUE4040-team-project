@@ -201,7 +201,7 @@ Colab/x86에서 만든 engine은 호환 안 됨):
   이미지 토픽은 대용량이라 필요시 QoS depth를 줄여 지연 누적을 막는다.
 - **SSH**: 카메라/모터는 Jetson 로컬 하드웨어 → 모든 노드는 Jetson에서 실행, 노트북은
   SSH 포트포워딩 또는 같은 네트워크에서 브라우저 모니터(`:8080`)로 본다.
-- **Colab**: GPU 런타임 + Roboflow API 다운로드(Phase 1). 학습 산출물(best.pt /
+- **Colab**: GPU 런타임 + CVAT export zip 업로드(Phase 1). 학습 산출물(best.pt /
   segformer_lane / e2e_best.pt)은 브라우저로 받아 WSL/Jetson에 배치.
 
 ---

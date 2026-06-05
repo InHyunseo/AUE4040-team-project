@@ -27,10 +27,10 @@
 
 ---
 
-### Roboflow에서 Resize ON으로 내보냈더니 bbox가 틀어진다
+### 라벨 export 때 resize/왜곡되면 bbox가 틀어진다
 **해결**:
-- Auto-Orient: ON, **Resize: OFF** 설정
-- ultralytics가 letterbox로 자체 처리하므로 stretch resize하면 bbox 왜곡 발생
+- export 단계에서 **stretch resize 금지** (원본 비율 유지). CVAT는 원본 그대로 내보냄.
+- ultralytics가 학습 시 letterbox로 자체 처리하므로, 미리 stretch resize하면 bbox 왜곡 발생
 
 ---
 
