@@ -158,6 +158,16 @@ class SegFormerLaneSeg:
     N_CLASSES = SEG_N_CLASSES
 
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
+        # Ubuntu/Jetson apt Pillow can be old enough to lack Image.Resampling,
+        # while recent transformers expects it. Alias the old constants module
+        # before importing transformers so SegFormer can run on the vehicle.
+        try:
+            from PIL import Image
+            if not hasattr(Image, "Resampling"):
+                Image.Resampling = Image
+        except ImportError:
+            pass
+
         try:
             from transformers.models.segformer.image_processing_segformer import (
                 SegformerImageProcessor,
