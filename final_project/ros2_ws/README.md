@@ -7,6 +7,7 @@
 | 패키지 | 노드 | 역할 |
 |---|---|---|
 | `rover_camera`   | `camera_node`        | jetcam 두 대 → `/lane_image/compressed`(sensor0, 차선세그), `/front_image/compressed`(sensor1, 객체인식) |
+| `rover_camera`   | `overlay_viz_node`   | frozen SegFormer/YOLO → `/lane_seg/compressed`, `/front_det/compressed` 실시간 오버레이 |
 | `rover_camera`   | `monitor_node`       | 카메라 JPEG를 재인코딩 없이 브라우저 MJPEG로 스트림 (`http://<host>:8080/`) |
 | `rover_teleop`   | `teleop_node`        | 키보드(cbreak) 1D steering level → `/cmd_vel`, `/steer_level`, `/record_enable` |
 | `rover_recorder` | `motor_bridge_node`  | `/cmd_vel` → UART (데이터 수집 전용) |
@@ -21,6 +22,8 @@
 ```
 /lane_image/compressed   sensor_msgs/CompressedImage  # sensor 0, 차선 세그 헤드
 /front_image/compressed  sensor_msgs/CompressedImage  # sensor 1, 객체인식 헤드
+/lane_seg/compressed     sensor_msgs/CompressedImage  # optional: lane + SegFormer overlay
+/front_det/compressed    sensor_msgs/CompressedImage  # optional: front + YOLO bbox overlay
 /cmd_vel                 geometry_msgs/Twist          # linear.x throttle, angular.z steering
 /steer_level             std_msgs/Int8                # -2..+2 raw teleop
 /record_enable           std_msgs/Bool                # bag on/off toggle
@@ -51,6 +54,17 @@ jupyter notebook ../data_pipeline/launch_and_record.ipynb
 - 같은 네트워크 노트북: `http://<젯슨-IP>:8080/` (기본 `monitor_host:=0.0.0.0`)
 
 끄려면 `monitor:=false`. 로컬만 열려면 `monitor_host:=127.0.0.1`.
+
+**모델 결과까지 실시간 확인**하려면 Phase 1 산출물
+`final_project/models/segformer_lane/`, `final_project/models/best.pt`를 둔 뒤:
+
+```bash
+ros2 launch rover_recorder record.launch.py session_name:=phase2_preview overlay_viz:=true
+```
+
+브라우저에는 `lane`, `front`, `lane_seg`, `front_det` 네 화면이 뜬다. 오버레이 노드는
+학습/추출과 같은 계약으로 lane 상단 ROI crop → 224 resize → SegFormer 색상 합성,
+front 224 resize → YOLO bbox 합성을 수행한다. 추론이 무거우면 `viz_fps:=1.0`처럼 낮춘다.
 
 **별도 SSH 터미널 1개** — 키보드 텔레옵:
 ```bash

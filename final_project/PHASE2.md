@@ -54,15 +54,17 @@ ros2 run rover_teleop teleop_node
 cd final_project/data_pipeline
 python3 extract_labels.py \
     --bag ../rover_data/phase2_<ts>/bag \
-    --segformer_ckpt <segformer_lane 폴더> \
-    --yolo_weights ../../main/best.pt \
+    --segformer_ckpt ../models/segformer_lane \
+    --yolo_weights ../models/best.pt \
     --out ../labels_cache.h5 \
     --debug_dir ../debug_samples \
     --device cuda
 ```
 
-- `--segformer_ckpt` **필수** (Phase 1 산출물). 없으면 에러.
-- `--yolo_weights` 기본값 `main/best.pt` (Phase 1 YOLO26 산출물).
+- Phase 1 산출물 배치: `final_project/models/best.pt` (YOLO26) +
+  `final_project/models/segformer_lane/` (SegFormer 폴더, config.json +
+  model.safetensors + preprocessor_config.json).
+- `--segformer_ckpt` **필수** (없으면 에러). `--yolo_weights` 기본값 `models/best.pt`.
 - `--skip_det` : YOLO 생략 (차량 없는 차선 전용 bag일 때).
 - `--limit N` : 앞 N 프레임만 (빠른 디버그용, 0=전체).
 - bag 여러 개면 각각 다른 `--out`으로 추출 후 학습 때 합치거나, 스크립트를
@@ -87,8 +89,8 @@ python3 extract_labels.py \
 > resize). 학습 데이터로더/오버레이 합성/추론 전처리가 모두 BGR로 일관되면 된다.
 >
 > **lane ROI 크롭**: lane 경로는 224 resize **직전에** `crop_lane_roi`로 상단
-> `LANE_CROP_TOP`(extract_labels.py 상수, 기본 0.0=크롭 없음) 비율을 잘라낸다. 차선
-> 카메라 상단이 도로 밖 배경이면 라벨링 **전에** 이 값을 정한다(예: 0.30). 한 번 정하면
+> `LANE_CROP_TOP`(extract_labels.py 상수, 현재 0.30) 비율을 잘라낸다. 0.0이면
+> 크롭하지 않는다. 차선 카메라 상단이 도로 밖 배경이면 라벨링 **전에** 이 값을 정한다. 한 번 정하면
 > 라벨링·추출·추론이 **모두 같은 값**을 써야 좌표계가 맞는다(라벨링 후 변경 금지).
 > front/YOLO는 크롭하지 않는다.
 
@@ -107,6 +109,18 @@ python3 visualize_labels.py --cache ../labels_cache.h5 --idx 0 \
 - seg 오버레이(좌=빨강/우=초록/중앙=파랑), car bbox, waypoint 점이 그려진 패널 출력.
 - `extract_labels.py`가 `--debug_dir`에 자동 저장한 `frame_*.png`도 함께 확인.
 - 세그가 차선을 못 잡거나 bbox가 헛돌면 → Phase 1 모델 재학습(라벨 추가)로 되돌아감.
+
+실시간으로도 확인 가능:
+
+```bash
+cd final_project/ros2_ws
+source install/setup.bash
+ros2 launch rover_recorder record.launch.py session_name:=phase2_preview overlay_viz:=true
+```
+
+`http://<젯슨-IP>:8080/`에서 raw `lane`/`front`와 함께 `lane_seg`/`front_det` 오버레이가
+뜬다. 이 미리보기는 `extract_labels.py`의 ROI crop, 224 resize, SegFormer 색상 합성,
+YOLO bbox 합성 계약을 그대로 재사용한다.
 
 ---
 

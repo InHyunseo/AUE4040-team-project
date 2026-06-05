@@ -102,8 +102,8 @@ class ControlHead(nn.Module):
     출력 활성화: Tanh
     - steer/throttle 범위를 [-1, 1]로 강제
     - rover_control에서 실제 값으로 역변환:
-        linear.x  = -(0.15 + abs(steer) * 0.10)  # -0.15 ~ -0.25
-        angular.z = steer * 0.8                   # -0.8 ~ +0.8
+        linear.x  = -(0.20 + abs(steer) * 0.05)  # -0.20 ~ -0.25
+        angular.z = steer * 1.2                   # -1.2 ~ +1.2
 
     학습: pretrained 없음, 처음부터 학습
     """
@@ -226,7 +226,7 @@ class E2ELoss(nn.Module):
       waypoint_weight=0.5  보조 task — 메인을 regularize하되 압도하지 않게
 
     참고: throttle GT는 텔레옵 1D steering level coupling에 의해
-          직선 ≈ -0.15, 회전 ≈ -0.25 분포.
+          직선 ≈ -0.20, 회전 ≈ -0.25 분포.
           waypoint GT는 cmd_vel 적분 궤적이라 모터 응답 지연/슬립으로
           약간 부정확 → 가중치를 메인보다 낮게 둬서 noise 영향 제한.
     """

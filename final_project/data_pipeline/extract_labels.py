@@ -24,7 +24,7 @@ Runs without ROS2 or camera hardware: rosbags + opencv + numpy + h5py
 
   python extract_labels.py --bag /path/to/rosbag2_dir \
       --segformer_ckpt ../models/segformer_lane \
-      --yolo_weights ../../main/best.pt \
+      --yolo_weights ../models/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
 
 SegFormer and YOLO are frozen (fine-tuned once in Phase 1). The H5 stores raw
@@ -43,11 +43,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-import h5py
 import numpy as np
 
-# rosbag2 reading (no ROS2 install required)
-from rosbags.highlevel import AnyReader
+# h5py and rosbags are only needed for offline H5 extraction (main()). They are
+# imported lazily inside the functions that use them so this module can be
+# imported for its frozen-model classes (SegFormerLaneSeg / YoloCarDet /
+# crop_lane_roi) on a vehicle/ROS2 host that has no h5py/rosbags installed.
 
 # -------------------------------------------------------------------- constants
 
@@ -66,10 +67,10 @@ FRONT_SIZE = (224, 224)
 # Fraction of the lane image to crop off the TOP before resizing to LANE_SIZE.
 # The lane camera's upper region is off-road background (sky/wall/far scene)
 # with no lane in it; cropping it gives the lanes more vertical resolution and
-# removes background distractors. 0.0 = no crop (current behaviour). Set this
-# from a real bag frame BEFORE labeling (changing it after labeling shifts the
-# coordinate frame and invalidates labels). Only the lane path uses this;
-# front/YOLO is never cropped (cars appear anywhere in frame).
+# removes background distractors. 0.0 = no crop; current project contract is
+# 0.30. Set this from a real bag frame BEFORE labeling (changing it after
+# labeling shifts the coordinate frame and invalidates labels). Only the lane
+# path uses this; front/YOLO is never cropped (cars appear anywhere in frame).
 LANE_CROP_TOP = 0.30
 
 # Display-only scale for drawing metric waypoints onto the debug image. Does
@@ -109,6 +110,7 @@ class CmdSample:
 
 
 def load_bag(bag_path: Path):
+    from rosbags.highlevel import AnyReader  # offline-only; not needed on vehicle
     lane, front, cmd = [], [], []
     with AnyReader([bag_path]) as reader:
         conns = {c.topic: c for c in reader.connections}
@@ -317,12 +319,14 @@ def save_debug(path: Path, lane: np.ndarray, front: np.ndarray,
 
 
 def main():
+    import h5py  # offline-only; not needed when importing frozen-model helpers
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--bag", required=True, type=Path)
     ap.add_argument("--segformer_ckpt", type=Path, default=None,
                     help="fine-tuned SegFormer lane checkpoint dir (required)")
     ap.add_argument("--yolo_weights", type=Path,
-                    default=Path(__file__).resolve().parents[2] / "main" / "best.pt",
+                    default=Path(__file__).resolve().parents[1] / "models" / "best.pt",
                     help="ultralytics YOLO best.pt (single-class car)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parents[1] / "labels_cache.h5")

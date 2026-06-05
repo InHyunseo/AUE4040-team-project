@@ -2,7 +2,7 @@
 TTY, so it works over SSH (no X). Terminal must be a foreground TTY — do NOT pipe.
 
   turn_level ∈ {-2..+2}, throttle coupled to |turn_level|, smoothed via approach():
-    level=0:  linear.x=-0.15, angular.z=0
+    level=0:  linear.x=-0.20, angular.z=0
     level=±2: linear.x=-0.25, angular.z=±1.2   (좌/우 두 번이면 최대 회전)
 
 Keys:
@@ -30,7 +30,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, Int8
 
 
-BASE_V       = 0.15
+BASE_V       = 0.20
 TURN_V       = 0.25
 MAX_OMEGA    = 1.2
 LEVELS       = 2   # 좌/우 두 번 누르면 최대 회전 (turn_level ∈ -2..+2)

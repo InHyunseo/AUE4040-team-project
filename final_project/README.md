@@ -122,7 +122,7 @@ smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
      직선 → 코너 → 복귀, 정지 차량 접근 → 회피 → 복귀 시퀀스 반복 수집
 4. 라벨 추출
      python data_pipeline/extract_labels.py --bag ... \
-         --segformer_ckpt ... --yolo_weights main/best.pt → labels_cache.h5
+         --segformer_ckpt models/segformer_lane --yolo_weights models/best.pt → labels_cache.h5
 5. E2E 학습 (Colab)
      ResNet18×2 + ControlHead + WaypointHead
 6. ONNX export → Jetson에서 trtexec --fp16 (engine은 Jetson에서만 빌드)

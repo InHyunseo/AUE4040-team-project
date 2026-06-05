@@ -22,6 +22,7 @@ setup(
         "console_scripts": [
             "camera_node = rover_camera.camera_node:main",
             "monitor_node = rover_camera.monitor_node:main",
+            "overlay_viz_node = rover_camera.overlay_viz_node:main",
         ],
     },
 )

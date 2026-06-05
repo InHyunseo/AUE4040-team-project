@@ -2,7 +2,7 @@
 <package format="3">
   <name>rover_camera</name>
   <version>0.1.0</version>
-  <description>Dual CSI camera publisher for Lane + Front streams.</description>
+  <description>Dual CSI camera publisher, live model overlays, and browser monitor.</description>
   <maintainer email="inhsroy@hanyang.ac.kr">hyunseo</maintainer>
   <license>MIT</license>
 
