@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 import cv2
@@ -91,6 +92,7 @@ class OverlayVizNode(Node):
         self.seg_alpha = min(1.0, max(0.0, float(self.get_parameter("seg_alpha").value)))
         self.enable_seg = bool(self.get_parameter("enable_seg").value)
         self.enable_det = bool(self.get_parameter("enable_det").value)
+        self._check_runtime_deps()
 
         lane_topic = str(self.get_parameter("lane_topic").value)
         front_topic = str(self.get_parameter("front_topic").value)
@@ -148,6 +150,31 @@ class OverlayVizNode(Node):
             f"{front_topic}->{front_overlay_topic} det={self.enable_det}, "
             f"fps={fps:.1f}"
         )
+
+    def _check_runtime_deps(self) -> None:
+        major = int(np.__version__.split(".", 1)[0])
+        if major >= 2:
+            raise RuntimeError(
+                "NumPy 2.x is installed, but Jetson PyTorch wheels are usually "
+                "built against NumPy 1.x. Fix on the Jetson with:\n"
+                "  python3 -m pip uninstall -y opencv-python opencv-contrib-python\n"
+                "  python3 -m pip install --user 'numpy<2.0'"
+            )
+        missing = []
+        if self.enable_seg:
+            for name in ("torch", "transformers"):
+                if find_spec(name) is None:
+                    missing.append(name)
+        if self.enable_det and find_spec("ultralytics") is None:
+            missing.append("ultralytics")
+        if missing:
+            raise RuntimeError(
+                "missing overlay runtime package(s): "
+                + ", ".join(sorted(set(missing)))
+                + "\nInstall on the Jetson, then keep NumPy on 1.x:\n"
+                "  python3 -m pip install --user transformers ultralytics\n"
+                "  python3 -m pip install --user 'numpy<2.0'"
+            )
 
     def _on_lane(self, msg: CompressedImage) -> None:
         self._lane_msg = msg

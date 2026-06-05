@@ -66,6 +66,17 @@ ros2 launch rover_recorder record.launch.py session_name:=phase2_preview overlay
 학습/추출과 같은 계약으로 lane 상단 ROI crop → 224 resize → SegFormer 색상 합성,
 front 224 resize → YOLO bbox 합성을 수행한다. 추론이 무거우면 `viz_fps:=1.0`처럼 낮춘다.
 
+Jetson에서 `ModuleNotFoundError: transformers` 또는 NumPy 2.x 경고가 뜨면:
+
+```bash
+python3 -m pip install --user transformers ultralytics
+python3 -m pip uninstall -y opencv-python opencv-contrib-python
+python3 -m pip install --user "numpy<2.0"
+python3 -c "import numpy, torch, transformers, ultralytics; print(numpy.__version__, torch.__version__, transformers.__version__, ultralytics.__version__)"
+```
+
+`opencv-python not installed` 경고는 무시 가능하다. Jetson 카메라는 apt/JetPack OpenCV를 써야 한다.
+
 **별도 SSH 터미널 1개** — 키보드 텔레옵:
 ```bash
 cd /home/ircv16/team/final_project/ros2_ws
