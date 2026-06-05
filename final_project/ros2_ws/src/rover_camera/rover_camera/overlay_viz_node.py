@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -99,28 +100,6 @@ class OverlayVizNode(Node):
         lane_overlay_topic = str(self.get_parameter("lane_overlay_topic").value)
         front_overlay_topic = str(self.get_parameter("front_overlay_topic").value)
 
-        device = str(self.get_parameter("device").value)
-        seg_ckpt = Path(str(self.get_parameter("segformer_ckpt").value)).expanduser()
-        yolo_weights = Path(str(self.get_parameter("yolo_weights").value)).expanduser()
-
-        self.segmenter = None
-        if self.enable_seg:
-            if not seg_ckpt.exists():
-                raise RuntimeError(f"SegFormer checkpoint not found: {seg_ckpt}")
-            self.get_logger().info(f"loading SegFormer from {seg_ckpt} on {device}")
-            self.segmenter = SegFormerLaneSeg(str(seg_ckpt), device=device)
-
-        self.detector = None
-        if self.enable_det:
-            if not yolo_weights.exists():
-                raise RuntimeError(f"YOLO weights not found: {yolo_weights}")
-            imgsz = int(self.get_parameter("yolo_imgsz").value)
-            conf = float(self.get_parameter("yolo_conf").value)
-            self.get_logger().info(f"loading YOLO from {yolo_weights} on {device}")
-            self.detector = YoloCarDet(
-                str(yolo_weights), device=device, imgsz=imgsz, conf=conf
-            )
-
         self.pub_lane = self.create_publisher(
             CompressedImage, lane_overlay_topic, 1
         )
@@ -142,6 +121,9 @@ class OverlayVizNode(Node):
         self._done_front_seq = 0
         self._tick_i = 0
 
+        self.segmenter = None
+        self.detector = None
+
         fps = max(0.1, float(self.get_parameter("viz_fps").value))
         self.timer = self.create_timer(1.0 / fps, self._tick)
         self.get_logger().info(
@@ -150,16 +132,21 @@ class OverlayVizNode(Node):
             f"{front_topic}->{front_overlay_topic} det={self.enable_det}, "
             f"fps={fps:.1f}"
         )
+        threading.Thread(target=self._load_models, daemon=True).start()
 
     def _check_runtime_deps(self) -> None:
         major = int(np.__version__.split(".", 1)[0])
         if major >= 2:
-            raise RuntimeError(
+            self.enable_seg = False
+            self.enable_det = False
+            self.get_logger().error(
                 "NumPy 2.x is installed, but Jetson PyTorch wheels are usually "
-                "built against NumPy 1.x. Fix on the Jetson with:\n"
+                "built against NumPy 1.x. Publishing raw preview fallbacks only. "
+                "Fix on the Jetson with:\n"
                 "  python3 -m pip uninstall -y opencv-python opencv-contrib-python\n"
                 "  python3 -m pip install --user 'numpy<2.0'"
             )
+            return
         missing = []
         if self.enable_seg:
             for name in ("torch", "transformers"):
@@ -168,13 +155,53 @@ class OverlayVizNode(Node):
         if self.enable_det and find_spec("ultralytics") is None:
             missing.append("ultralytics")
         if missing:
-            raise RuntimeError(
+            if "torch" in missing or "transformers" in missing:
+                self.enable_seg = False
+            if "ultralytics" in missing:
+                self.enable_det = False
+            self.get_logger().error(
                 "missing overlay runtime package(s): "
                 + ", ".join(sorted(set(missing)))
-                + "\nInstall on the Jetson, then keep NumPy on 1.x:\n"
+                + ". Publishing raw preview fallbacks for unavailable models.\n"
+                "Install on the Jetson, then keep NumPy on 1.x:\n"
                 "  python3 -m pip install --user transformers ultralytics\n"
                 "  python3 -m pip install --user 'numpy<2.0'"
             )
+
+    def _load_models(self) -> None:
+        device = str(self.get_parameter("device").value)
+        seg_ckpt = Path(str(self.get_parameter("segformer_ckpt").value)).expanduser()
+        yolo_weights = Path(str(self.get_parameter("yolo_weights").value)).expanduser()
+
+        if self.enable_seg:
+            try:
+                if not seg_ckpt.exists():
+                    raise RuntimeError(f"SegFormer checkpoint not found: {seg_ckpt}")
+                self.get_logger().info(f"loading SegFormer from {seg_ckpt} on {device}")
+                self.segmenter = SegFormerLaneSeg(str(seg_ckpt), device=device)
+            except Exception as exc:
+                self.segmenter = None
+                self.get_logger().error(
+                    "SegFormer unavailable; /lane_seg/compressed will publish "
+                    f"resized raw lane frames. reason: {exc}"
+                )
+
+        if self.enable_det:
+            try:
+                if not yolo_weights.exists():
+                    raise RuntimeError(f"YOLO weights not found: {yolo_weights}")
+                imgsz = int(self.get_parameter("yolo_imgsz").value)
+                conf = float(self.get_parameter("yolo_conf").value)
+                self.get_logger().info(f"loading YOLO from {yolo_weights} on {device}")
+                self.detector = YoloCarDet(
+                    str(yolo_weights), device=device, imgsz=imgsz, conf=conf
+                )
+            except Exception as exc:
+                self.detector = None
+                self.get_logger().error(
+                    "YOLO unavailable; /front_det/compressed will publish "
+                    f"resized raw front frames. reason: {exc}"
+                )
 
     def _on_lane(self, msg: CompressedImage) -> None:
         self._lane_msg = msg
@@ -208,12 +235,18 @@ class OverlayVizNode(Node):
 
     def _process_lane(self, msg: CompressedImage) -> CompressedImage:
         lane = cv2.resize(crop_lane_roi(_decode_jpeg(msg)), LANE_SIZE)
+        if self.segmenter is None:
+            _put_status(lane, "seg unavailable")
+            return self._encode(lane, msg)
         seg = self.segmenter(lane)
         overlay = _overlay_seg(lane, seg, self.seg_alpha)
         return self._encode(overlay, msg)
 
     def _process_front(self, msg: CompressedImage) -> CompressedImage:
         front = cv2.resize(_decode_jpeg(msg), FRONT_SIZE)
+        if self.detector is None:
+            _put_status(front, "det unavailable")
+            return self._encode(front, msg)
         det = self.detector(front)
         overlay = _overlay_det(front, det)
         return self._encode(overlay, msg)
@@ -263,6 +296,18 @@ def _overlay_det(front: np.ndarray, det: np.ndarray) -> np.ndarray:
             1,
         )
     return vis
+
+
+def _put_status(img: np.ndarray, text: str) -> None:
+    cv2.putText(
+        img,
+        text,
+        (5, 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 0, 255),
+        1,
+    )
 
 
 def main() -> None:
