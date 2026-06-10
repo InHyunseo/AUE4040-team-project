@@ -86,7 +86,8 @@ Phase 2 — 대량 rosbag 데이터 (라벨링 X)
 - Phase 1 라벨링은 한 번만 (클래스당 200장+). 실제 트랙 환경 사진으로.
 - Phase 2 본 학습 데이터는 라벨링 0 — cmd_vel은 텔레옵에서, 세그/bbox는 freeze 모델이 자동 생성.
 
-Phase 1 상세는 [PHASE1.md](PHASE1.md) 참고.
+Phase 1 상세는 [PHASE1.md](PHASE1.md), Phase 2(수집·학습)는 [PHASE2.md](PHASE2.md),
+Phase 3(실차 추론·모니터링·추가학습)는 [PHASE3.md](PHASE3.md) 참고.
 
 ---
 
@@ -123,10 +124,12 @@ smoothing(approach 보간)으로 실제 cmd_vel은 연속적으로 변함.
 4. 라벨 추출
      python data_pipeline/extract_labels.py --bag ... \
          --segformer_ckpt models/segformer_lane --yolo_weights models/best.pt → labels_cache.h5
-5. E2E 학습 (Colab)
-     ResNet18×2 + ControlHead + WaypointHead
-6. ONNX export → Jetson에서 trtexec --fp16 (engine은 Jetson에서만 빌드)
-7. rover_lane 노드 교체 → 실차 테스트
+5. E2E 학습 (Colab) → ONNX export
+     ResNet18×2 + ControlHead + WaypointHead  [training/train_e2e_colab.ipynb → e2e.onnx]
+─────────────────────────  여기까지 Phase 2 (PHASE2.md)  ─────────────────────────
+6. Jetson에서 trtexec --fp16 → e2e.engine (engine은 Jetson에서만 빌드)
+7. rover_lane 추론 노드 → 실차 주행 + 주행 모니터링 + 추가학습   [Phase 3 (PHASE3.md)]
 ```
 
+단계 상세: 수집~학습은 [PHASE2.md](PHASE2.md), 배포~추론~추가학습은 [PHASE3.md](PHASE3.md).
 ROS2 노드 사용법은 [ros2_ws/README.md](ros2_ws/README.md) 참고.

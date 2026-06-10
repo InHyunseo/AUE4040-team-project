@@ -1,8 +1,11 @@
-# Phase 2 — 대량 수집 & E2E 본 학습 → 실차 배포
+# Phase 2 — 대량 수집 & E2E 본 학습 → ONNX
 
 > Phase 1에서 freeze한 SegFormer/YOLO를 써서 **라벨링 없이** 대량 데이터를
 > 자동 라벨링하고, ResNet18×2 + ControlHead/WaypointHead를 E2E로 학습해
-> ONNX→TensorRT로 변환, 실차에 올리는 단계.
+> `e2e.onnx`까지 만드는 단계.
+>
+> Jetson engine 빌드 / 실차 추론 노드 / 주행 모니터링 / 추가학습은
+> **[PHASE3.md](PHASE3.md)** 로 분리했다.
 >
 > Phase 1 상세는 [PHASE1.md](PHASE1.md), 모델 구조는 [model.py](model.py) 참고.
 
@@ -14,10 +17,10 @@
 1. 대량 rosbag 수집 (라벨링 X)   → final_project/rover_data/<session>_<ts>/bag
 2. 라벨 자동 추출                → labels_cache.h5  (SegFormer/YOLO freeze + cmd_vel)
 3. 라벨 검증 (눈 확인)           → debug_samples/*.png
-4. E2E 학습 (Colab)             → E2ENet best 체크포인트   [미구현 — 명세만]
-5. ONNX export                  → e2e.onnx
-6. Jetson TensorRT 변환          → e2e.engine  (trtexec --fp16, Jetson에서만)
-7. rover_lane 추론 노드 교체      → 실차 테스트
+4. E2E 학습 (Colab)             → e2e_best.pt  (train_e2e.py, 의도 시각화/이어학습 지원)
+5. ONNX export                  → e2e.onnx     (export_onnx.py)
+─────────────────────────  여기까지 Phase 2  ─────────────────────────
+6~7. Jetson engine 빌드 + rover_lane 추론 노드 + 주행 모니터링 + 추가학습 → PHASE3.md
 ```
 
 Phase 2 수집 데이터는 **라벨링 0** — cmd_vel은 텔레옵에서, 차선 세그/차량 bbox는
@@ -129,9 +132,12 @@ YOLO bbox 합성 계약을 그대로 재사용한다.
 
 ---
 
-## 4단계 — E2E 학습 (Colab) [미구현 — 명세만]
+## 4단계 — E2E 학습 (Colab)
 
-> 데이터로더 / 학습 루프 / Colab 노트북은 **아직 없음 (TODO)**. 아래는 구현 명세.
+> 구현됨: [training/dataset.py](training/dataset.py)(H5→오버레이 합성 Dataset),
+> [training/train_e2e.py](training/train_e2e.py)(학습 루프),
+> [training/export_onnx.py](training/export_onnx.py)(5단계 ONNX),
+> [training/train_e2e_colab.ipynb](training/train_e2e_colab.ipynb)(Colab).
 
 모델: [model.py](model.py) 의 `E2ENet`
 - `LaneEncoder` / `FrontEncoder` (ResNet18×2, ImageNet pretrained) → 각 256-d
@@ -177,39 +183,14 @@ torch.onnx.export(
 
 ---
 
-## 6단계 — Jetson TensorRT 변환
+## 다음 → Phase 3 (배포 · 추론 · 모니터링 · 추가학습)
 
-ONNX→engine은 **Jetson(Orin Nano)에서만** 빌드한다 (GPU 아키텍처가 박히므로
-Colab/x86에서 만든 engine은 호환 안 됨):
+`e2e.onnx`가 나오면 여기서부터는 **[PHASE3.md](PHASE3.md)**:
 
-```bash
-# Jetson에서
-/usr/src/tensorrt/bin/trtexec \
-    --onnx=e2e.onnx --fp16 --saveEngine=e2e.engine
-```
-
-- YOLO26은 NMS-free라 그 자체 ONNX도 후처리 없이 깔끔하게 변환됨
-  (Front bbox를 런타임에서 합성할지, 사전 합성된 입력만 받을지는 7단계 노드 설계에 따름).
-
----
-
-## 7단계 — 실차 (rover_lane 추론 노드) [별도 구현 TODO]
-
-추론 노드 흐름:
-```
-/lane_image/compressed  → SegFormer → seg 오버레이 lane (224×224, BGR)
-/front_image/compressed → YOLO26    → bbox 오버레이 front (224×224, BGR)
-  → e2e.engine (TensorRT) → steer, throttle
-  → 역변환 후 /cmd_vel:
-       linear.x  = -(0.15 + abs(steer) * 0.10)   # -0.15 ~ -0.25
-       angular.z = steer * 0.8                     # -0.8 ~ +0.8
-  → motor_bridge_node → UART
-```
-
-- 전처리(ROI 크롭/세그/bbox 오버레이)는 **학습 때와 픽셀 단위로 동일**해야 함 — 4단계
-  합성 계약 그대로. lane은 `crop_lane_roi`(같은 `LANE_CROP_TOP`) 후 224 resize, 색공간
-  (BGR)·정규화·resize 순서 일치 필수.
-- waypoint 출력은 무시(또는 디버그 시각화용으로만).
+- Jetson에서 `trtexec --fp16`로 `e2e.engine` 빌드 (engine은 Jetson에서만)
+- `rover_lane` 추론 노드: 전처리(학습과 픽셀 단위 동일) → engine → cmd_vel 역변환
+- 주행 중 의도 모니터링 (`viz.draw_intent`, :8080 오버레이)
+- 새 bag으로 `--resume` 추가학습 루프
 
 ---
 
@@ -229,6 +210,7 @@ Colab/x86에서 만든 engine은 호환 안 됨):
 
 - [ ] 대량 rosbag 수집 (다양한 차선 + 정지차 회피 시퀀스)
 - [ ] `extract_labels.py`로 `labels_cache.h5` 생성 + `visualize_labels.py` 눈 검증 통과
-- [ ] E2E 학습 → `e2e.onnx` export  (학습 노트북 구현 포함)
-- [ ] Jetson에서 `e2e.engine` 빌드 (fp16)
-- [ ] rover_lane 추론 노드 → 실차에서 차선 주행 + 정지차 회피·추월 확인
+- [x] E2E 학습 코드 구현 (dataset/train/export + Colab 노트북 + 의도 시각화 + 이어학습)
+- [ ] 실제 데이터로 E2E 학습 → `e2e.onnx` export
+
+> 이후(engine 빌드 · 실차 추론 · 주행 모니터링 · 추가학습)는 [PHASE3.md](PHASE3.md) 완료 기준 참고.
