@@ -83,8 +83,11 @@ SEG_N_CLASSES = 3  # 0=left-solid, 1=right-solid, 2=center-dashed (background ex
 # -------------------------------------------------------------------- helpers
 
 
-def decode_compressed(msg) -> np.ndarray:
-    arr = np.frombuffer(msg.data, np.uint8)
+def decode_compressed(data) -> np.ndarray:
+    """JPEG bytes(또는 .data 를 가진 메시지) → BGR uint8 이미지."""
+    if hasattr(data, "data"):
+        data = data.data
+    arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError("cv2.imdecode returned None")
@@ -119,7 +122,12 @@ def _header_stamp_ns(msg, fallback_ns: int) -> int:
 
 
 def load_bag(bag_path: Path):
-    """lane/front 는 (capture_stamp_ns, write_ts_ns, image) 로 반환한다.
+    """lane/front 는 (capture_stamp_ns, write_ts_ns, jpeg_bytes) 로 반환한다.
+
+    이미지는 **디코드하지 않고 압축된 JPEG bytes 그대로** 보관한다(메모리 절약).
+    수천 프레임 bag 을 전부 디코드하면 프레임당 ~2.7 MB 라 수 GB → Jetson(7.4 GB)
+    에서 OOM 으로 죽는다. JPEG bytes 는 프레임당 ~30 KB 라 수천 장도 수십 MB 면 된다.
+    실제 디코드는 main 루프에서 매칭에 채택된 프레임에 한해 그때그때 한다.
 
     capture_stamp_ns = header.stamp(camera_node 가 찍은 캡처 시각). lane↔front
     정합은 이 값으로 한다(인코딩/송신 순서 지연이 stamp 에 안 실리므로 정확).
@@ -127,8 +135,12 @@ def load_bag(bag_path: Path):
     있으므로, lane↔cmd 매칭과 waypoint 적분은 write 시각끼리 비교해 시계를 안 섞는다.
     """
     from rosbags.highlevel import AnyReader  # offline-only; not needed on vehicle
+    from rosbags.typesys import Stores, get_typestore
+    # 이 bag 들은 메시지 타입 정의를 함께 저장하지 않으므로(rosbags 최신 버전은
+    # 그럴 때 명시적 typestore 를 요구한다) 녹화 배포판(Humble)의 typestore 를 준다.
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
     lane, front, cmd = [], [], []
-    with AnyReader([bag_path]) as reader:
+    with AnyReader([bag_path], default_typestore=typestore) as reader:
         conns = {c.topic: c for c in reader.connections}
         missing = [t for t in (LANE_TOPIC, FRONT_TOPIC, CMD_TOPIC) if t not in conns]
         if missing:
@@ -136,9 +148,9 @@ def load_bag(bag_path: Path):
         for conn, ts, raw in reader.messages(connections=list(conns.values())):
             msg = reader.deserialize(raw, conn.msgtype)
             if conn.topic == LANE_TOPIC:
-                lane.append((_header_stamp_ns(msg, ts), ts, decode_compressed(msg)))
+                lane.append((_header_stamp_ns(msg, ts), ts, bytes(msg.data)))
             elif conn.topic == FRONT_TOPIC:
-                front.append((_header_stamp_ns(msg, ts), ts, decode_compressed(msg)))
+                front.append((_header_stamp_ns(msg, ts), ts, bytes(msg.data)))
             elif conn.topic == CMD_TOPIC:
                 cmd.append(CmdSample(ts, float(msg.linear.x), float(msg.angular.z)))
     lane.sort(key=lambda x: x[0])   # 캡처 시각 기준 정렬
@@ -372,8 +384,8 @@ def main():
                     help="ultralytics YOLO best.pt (single-class car)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parents[1] / "labels_cache.h5")
-    ap.add_argument("--debug_dir", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "debug_samples")
+    ap.add_argument("--debug_dir", type=Path, default=None,
+                    help="주면 검증용 디버그 PNG(~100장)를 저장. 생략하면 안 만든다.")
     ap.add_argument("--limit", type=int, default=0, help="cap N frames (0=all)")
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     ap.add_argument("--skip_det", action="store_true", help="skip YOLO car detection")
@@ -400,7 +412,8 @@ def main():
     det = None if args.skip_det else YoloCarDet(str(args.yolo_weights), device=args.device)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.debug_dir.mkdir(parents=True, exist_ok=True)
+    if args.debug_dir is not None:
+        args.debug_dir.mkdir(parents=True, exist_ok=True)
 
     n_candidate = len(lane_msgs)
     if args.limit:
@@ -438,8 +451,9 @@ def main():
             if wps is None:
                 continue
 
-            lane = cv2.resize(crop_lane_roi(lane_src), LANE_SIZE)
-            front = cv2.resize(front_msgs[j][2], FRONT_SIZE)
+            # 매칭·waypoint 검사를 통과한 프레임만 여기서 디코드(메모리/시간 절약).
+            lane = cv2.resize(crop_lane_roi(decode_compressed(lane_src)), LANE_SIZE)
+            front = cv2.resize(decode_compressed(front_msgs[j][2]), FRONT_SIZE)
             seg = segmenter(lane)
             det_arr = det(front) if det is not None else YoloCarDet.empty()
 
@@ -457,7 +471,7 @@ def main():
             d_thr[kept] = v
             d_ts[kept] = cap_ns
 
-            if kept % debug_stride == 0:
+            if args.debug_dir is not None and kept % debug_stride == 0:
                 save_debug(args.debug_dir / f"frame_{kept:05d}.png",
                            lane, front, seg, det_arr, wps)
 
@@ -472,7 +486,8 @@ def main():
         h5.attrs["bag"] = str(args.bag)
 
     print(f"done. kept={kept} -> {args.out}")
-    print(f"debug samples -> {args.debug_dir}")
+    if args.debug_dir is not None:
+        print(f"debug samples -> {args.debug_dir}")
 
 
 if __name__ == "__main__":
