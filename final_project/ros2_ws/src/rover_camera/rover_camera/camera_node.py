@@ -64,7 +64,12 @@ class CameraNode(Node):
             f"front(sensor_id={front_id})={self.cam_front.running()}"
         )
 
-        self._latest: dict[str, np.ndarray | None] = {"lane": None, "front": None}
+        # 각 키마다 (frame, capture_stamp) 를 함께 보관한다. capture_stamp 는
+        # reader 스레드가 프레임을 잡은 직후 찍은 ROS 시각으로, publish 시
+        # header.stamp 에 그대로 넣어 두 카메라 간 정합 기준을 '캡처 시각'으로
+        # 만든다(인코딩/송신 순서 지연이 stamp 에 누적되지 않게).
+        self._latest: dict[str, tuple[np.ndarray, "rclpy.time.Time"] | None] = {
+            "lane": None, "front": None}
         self._stop = False
         for cam, key in [(self.cam_lane, "lane"), (self.cam_front, "front")]:
             threading.Thread(target=self._reader, args=(cam, key), daemon=True).start()
@@ -82,16 +87,19 @@ class CameraNode(Node):
             try:
                 f = cam.read_bgr()
                 if f is not None:
-                    self._latest[key] = f
+                    # 프레임을 받은 '직후'의 시각이 캡처 시각의 최선의 근사다.
+                    self._latest[key] = (f, self.get_clock().now())
             except Exception:
                 time.sleep(0.01)
 
-    def _encode(self, bgr: np.ndarray) -> CompressedImage:
+    def _encode(self, bgr: np.ndarray, stamp) -> CompressedImage:
         ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_q])
         if not ok:
             raise RuntimeError("cv2.imencode failed")
         msg = CompressedImage()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        # 캡처 시각을 그대로 싣는다(publish/인코딩 시각이 아니라). 추출 단계가
+        # 이 stamp 로 lane↔front 를 매칭하면 두 카메라 정합이 캡처 기준이 된다.
+        msg.header.stamp = stamp.to_msg()
         msg.format = "jpeg"
         msg.data = jpg.tobytes()
         return msg
@@ -100,10 +108,11 @@ class CameraNode(Node):
         self._tick_i += 1
         for key, pub, frame_id in [("lane",  self.pub_lane,  "lane_camera"),
                                    ("front", self.pub_front, "front_camera")]:
-            frame = self._latest[key]
-            if frame is None:
+            latest = self._latest[key]
+            if latest is None:
                 continue
-            msg = self._encode(frame)
+            frame, stamp = latest
+            msg = self._encode(frame, stamp)
             msg.header.frame_id = frame_id
             pub.publish(msg)
         if self._tick_i % 30 == 0:

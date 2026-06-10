@@ -103,6 +103,7 @@ front 경로: `cv2.resize(.., FRONT_SIZE)` → `YoloCarDet`(freeze) → `dataset
   지연 누적을 끊는다 — 과거 프레임 보고 조향하면 위험하므로 최신성이 정답.
   트레이드오프는 프레임 드롭이지만 제어엔 무해(완결성 불필요). 큐 적체 지연만 끊는
   것이고, SegFormer+YOLO+engine **처리시간 자체 지연은 TensorRT fp16의 몫**.
+- 카메라 `header.stamp`는 **캡처 시각**(Phase 2 메모 참조) — 두 카메라 정합 기준.
 
 ---
 

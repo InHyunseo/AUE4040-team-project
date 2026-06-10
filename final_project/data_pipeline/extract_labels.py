@@ -110,7 +110,22 @@ class CmdSample:
     w: float        # angular.z rad/s
 
 
+def _header_stamp_ns(msg, fallback_ns: int) -> int:
+    """CompressedImage 의 header.stamp(캡처 시각)를 ns 로. stamp 가 0(미설정,
+    구버전 camera_node)이면 bag-write ts 로 폴백해 옛 bag 도 그대로 추출된다."""
+    st = msg.header.stamp
+    ns = int(st.sec) * 1_000_000_000 + int(st.nanosec)
+    return ns if ns > 0 else fallback_ns
+
+
 def load_bag(bag_path: Path):
+    """lane/front 는 (capture_stamp_ns, write_ts_ns, image) 로 반환한다.
+
+    capture_stamp_ns = header.stamp(camera_node 가 찍은 캡처 시각). lane↔front
+    정합은 이 값으로 한다(인코딩/송신 순서 지연이 stamp 에 안 실리므로 정확).
+    write_ts_ns = rosbag write 시각. cmd_vel/steer 는 header 가 없어 write 시각만
+    있으므로, lane↔cmd 매칭과 waypoint 적분은 write 시각끼리 비교해 시계를 안 섞는다.
+    """
     from rosbags.highlevel import AnyReader  # offline-only; not needed on vehicle
     lane, front, cmd = [], [], []
     with AnyReader([bag_path]) as reader:
@@ -121,12 +136,12 @@ def load_bag(bag_path: Path):
         for conn, ts, raw in reader.messages(connections=list(conns.values())):
             msg = reader.deserialize(raw, conn.msgtype)
             if conn.topic == LANE_TOPIC:
-                lane.append((ts, decode_compressed(msg)))
+                lane.append((_header_stamp_ns(msg, ts), ts, decode_compressed(msg)))
             elif conn.topic == FRONT_TOPIC:
-                front.append((ts, decode_compressed(msg)))
+                front.append((_header_stamp_ns(msg, ts), ts, decode_compressed(msg)))
             elif conn.topic == CMD_TOPIC:
                 cmd.append(CmdSample(ts, float(msg.linear.x), float(msg.angular.z)))
-    lane.sort(key=lambda x: x[0])
+    lane.sort(key=lambda x: x[0])   # 캡처 시각 기준 정렬
     front.sort(key=lambda x: x[0])
     cmd.sort(key=lambda c: c.t_ns)
     return lane, front, cmd
@@ -377,7 +392,7 @@ def main():
     if not lane_msgs or not front_msgs or not cmds:
         raise RuntimeError("empty bag for one or more topics")
 
-    front_ts = [t for t, _ in front_msgs]
+    front_cap = [cap for cap, _, _ in front_msgs]   # front 캡처시각 (lane↔front 매칭용)
     cmd_ts = [c.t_ns for c in cmds]
 
     print(f"loading SegFormer {args.segformer_ckpt} ...")
@@ -409,20 +424,22 @@ def main():
         d_ts    = dset("timestamp_ns", (), "int64")
 
         kept = 0
-        for i, (t_ns, lane_src) in enumerate(lane_msgs[:n_candidate]):
-            j = nearest(front_ts, t_ns)
-            if abs(front_ts[j] - t_ns) > SYNC_TOL_NS:
+        for i, (cap_ns, write_ns, lane_src) in enumerate(lane_msgs[:n_candidate]):
+            # lane↔front 는 캡처 시각으로 매칭(두 카메라 정합 정확도의 핵심).
+            j = nearest(front_cap, cap_ns)
+            if abs(front_cap[j] - cap_ns) > SYNC_TOL_NS:
                 continue
-            ci = nearest(cmd_ts, t_ns)
-            if abs(cmd_ts[ci] - t_ns) > SYNC_TOL_NS:
+            # lane↔cmd / waypoint 는 같은 시계(rosbag write 시각)끼리 비교한다.
+            ci = nearest(cmd_ts, write_ns)
+            if abs(cmd_ts[ci] - write_ns) > SYNC_TOL_NS:
                 continue
 
-            wps = waypoint_gt(cmds, cmd_ts, t_ns)
+            wps = waypoint_gt(cmds, cmd_ts, write_ns)
             if wps is None:
                 continue
 
             lane = cv2.resize(crop_lane_roi(lane_src), LANE_SIZE)
-            front = cv2.resize(front_msgs[j][1], FRONT_SIZE)
+            front = cv2.resize(front_msgs[j][2], FRONT_SIZE)
             seg = segmenter(lane)
             det_arr = det(front) if det is not None else YoloCarDet.empty()
 
@@ -438,7 +455,7 @@ def main():
             d_wp[kept] = wps
             d_steer[kept] = w
             d_thr[kept] = v
-            d_ts[kept] = t_ns
+            d_ts[kept] = cap_ns
 
             if kept % debug_stride == 0:
                 save_debug(args.debug_dir / f"frame_{kept:05d}.png",

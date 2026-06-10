@@ -91,6 +91,7 @@ rosbag (대량 텔레옵 주행)
 ```
 
 - lane 프레임마다 가장 가까운 front/cmd_vel을 **±50ms 시간 동기화**해 1샘플 생성.
+  - 두 카메라는 free-running(위상차 측정 median ≈26ms) → **`header.stamp`에 캡처 시각**을 실어 lane↔front를 캡처 기준으로 매칭(인코딩/송신 지연 비반영).
 - H5에 raw 이미지 + seg/det를 **따로** 저장 → 오버레이 합성은 dataloader에서 → 재추출 없이 합성 튜닝 가능.
 - 색공간(BGR)·ROI 크롭(`LANE_CROP_TOP=0.30`)을 라벨/추출/추론 전부 동일하게 고정(좌표계 정합).
 - **눈 검증**(`data_pipeline/visualize_labels.py`)으로 세그/bbox 품질 확인 후 학습.
@@ -137,7 +138,7 @@ loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)
 - 노드 5개(camera/monitor/teleop/motor_bridge/bag_recorder) 단일 책임 분리.
 - `MultiThreadedExecutor` + `ReentrantCallbackGroup` — 수신/추론/제어 스레드 분리(블로킹 방지).
 - 카메라 hot-path: jetcam **native BGR 그대로 JPEG 인코딩** → BGR↔RGB 왕복 제거.
-  리더 스레드 분리, capture_fps 2배로 버퍼 신선.
+  리더 스레드 분리, capture_fps 2배로 버퍼 신선. `header.stamp`는 **캡처 시각**(publish 아님) → 두 카메라 정합 정확.
 - DDS/QoS: `ROS_LOCALHOST_ONLY=1`로 외부 멀티캐스트 차단(지연↓). 이미지 토픽은
   **실시간 소비자(모니터·오버레이·추론)만 BEST_EFFORT+depth1**로 옛 프레임 버려 지연 누적 차단
   (트레이드오프 프레임 드롭). **학습 bag recorder는 RELIABLE 유지**(완결성). 처리시간 지연은 TensorRT fp16로 별도 해결.

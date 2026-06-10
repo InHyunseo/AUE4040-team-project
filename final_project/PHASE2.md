@@ -82,6 +82,15 @@ python3 extract_labels.py \
 
 각 lane 프레임 t마다 가장 가까운 front/cmd_vel을 ±50 ms로 동기화해 1 샘플 생성:
 
+> **두 카메라 정합 기준**: lane↔front 매칭은 **`header.stamp`(캡처 시각)** 로 한다.
+> camera_node가 reader 스레드에서 프레임을 받은 직후 시각을 stamp에 찍으므로,
+> JPEG 인코딩·DDS 송신·publish 순서로 누적되는 지연이 stamp에 실리지 않는다.
+> cmd_vel/steer는 header가 없어 lane↔cmd 매칭·waypoint 적분만 rosbag write 시각
+> 끼리 비교한다(두 시계를 섞지 않음). 옛 bag(stamp 미설정)은 write 시각으로 폴백.
+> 두 CSI 카메라는 free-running이라 캡처 위상차(~한 프레임 이하, 측정 median ≈26 ms)
+> 자체는 genlock 없이 못 없애지만, 위 매칭이 캡처 시각 기준이라 항상 최근접 프레임을
+> 짝짓는다.
+
 | 데이터셋 | shape | dtype | 내용 |
 |---|---|---|---|
 | `lane` | (224,224,3) | uint8 | lane 이미지, 상단 ROI 크롭 후 resize (**BGR**) |
@@ -91,7 +100,7 @@ python3 extract_labels.py \
 | `waypoint` | (5,2) | float32 | cmd_vel 적분 미래 0.5초 궤적 (로봇 프레임, 미터) |
 | `steer` | () | float32 | angular.z at t |
 | `throttle` | () | float32 | linear.x at t |
-| `timestamp_ns` | () | int64 | lane 프레임 타임스탬프 |
+| `timestamp_ns` | () | int64 | lane 프레임 **캡처 시각**(`header.stamp`) |
 
 > **색공간 주의**: lane/front는 **BGR**로 저장된다(추출이 wire JPEG를 BGR로 디코드 후
 > resize). 학습 데이터로더/오버레이 합성/추론 전처리가 모두 BGR로 일관되면 된다.
@@ -206,6 +215,10 @@ torch.onnx.export(
   camera_node 송신은 `RELIABLE + depth=1`(송신측 옛 프레임 미보관) — RELIABLE이라
   recorder(RELIABLE sub)와 매칭되고, BEST_EFFORT 소비자 sub과도 매칭된다.
   (큐 적체 지연만 QoS로 끊는 것이고, 추론 처리시간 자체 지연은 TensorRT fp16의 몫.)
+- **카메라 timestamp**: camera_node는 `header.stamp`에 publish 시각이 아니라
+  **캡처 직후 시각**을 찍는다(reader 스레드가 프레임 받은 순간). 두 카메라가
+  free-running이라 위상이 어긋나는데, 캡처 시각을 실어야 extract_labels가
+  lane↔front를 캡처 기준으로 정확히 매칭한다(인코딩/송신 순서 지연 비반영).
 - **SSH**: 카메라/모터는 Jetson 로컬 하드웨어 → 모든 노드는 Jetson에서 실행, 노트북은
   SSH 포트포워딩 또는 같은 네트워크에서 브라우저 모니터(`:8080`)로 본다.
 - **Colab**: GPU 런타임 + CVAT export zip 업로드(Phase 1). 학습 산출물(best.pt /
