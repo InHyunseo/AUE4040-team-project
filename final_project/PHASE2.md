@@ -198,7 +198,14 @@ torch.onnx.export(
 
 - **DDS/QoS**: 단일 호스트(Jetson) 안에서만 ROS2를 돌리면
   `export ROS_LOCALHOST_ONLY=1`로 외부 노드·멀티캐스트를 차단해 지연/간섭을 줄인다.
-  이미지 토픽은 대용량이라 필요시 QoS depth를 줄여 지연 누적을 막는다.
+  이미지 토픽은 대용량이라 **실시간 소비자**(monitor_node·overlay_viz_node)는
+  `BEST_EFFORT + KEEP_LAST depth=1` QoS를 쓴다 — 밀린 옛 프레임을 버리고 최신만
+  처리해 지연 누적을 끊는다(트레이드오프: 프레임 드롭). 단 **학습 bag을 저장하는
+  bag_recorder 는 RELIABLE + 넉넉한 depth 유지** — 데이터 완결성이 필요해 프레임을
+  버리면 안 된다(빠진 프레임은 extract_labels 동기화·waypoint 적분을 망친다).
+  camera_node 송신은 `RELIABLE + depth=1`(송신측 옛 프레임 미보관) — RELIABLE이라
+  recorder(RELIABLE sub)와 매칭되고, BEST_EFFORT 소비자 sub과도 매칭된다.
+  (큐 적체 지연만 QoS로 끊는 것이고, 추론 처리시간 자체 지연은 TensorRT fp16의 몫.)
 - **SSH**: 카메라/모터는 Jetson 로컬 하드웨어 → 모든 노드는 Jetson에서 실행, 노트북은
   SSH 포트포워딩 또는 같은 네트워크에서 브라우저 모니터(`:8080`)로 본다.
 - **Colab**: GPU 런타임 + CVAT export zip 업로드(Phase 1). 학습 산출물(best.pt /

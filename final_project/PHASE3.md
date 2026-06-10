@@ -98,7 +98,11 @@ front 경로: `cv2.resize(.., FRONT_SIZE)` → `YoloCarDet`(freeze) → `dataset
 ### QoS / DDS (Phase 2 메모와 동일)
 
 - 단일 Jetson 호스트면 `export ROS_LOCALHOST_ONLY=1`.
-- 이미지 토픽은 대용량 → QoS depth 작게(예: 1) + best-effort로 지연 누적 방지.
+- 추론 노드는 **실시간 소비자** → 이미지 sub에 `BEST_EFFORT + KEEP_LAST depth=1`
+  (monitor_node·overlay_viz_node와 동일 QoS). 밀린 옛 프레임을 버리고 최신만 처리해
+  지연 누적을 끊는다 — 과거 프레임 보고 조향하면 위험하므로 최신성이 정답.
+  트레이드오프는 프레임 드롭이지만 제어엔 무해(완결성 불필요). 큐 적체 지연만 끊는
+  것이고, SegFormer+YOLO+engine **처리시간 자체 지연은 TensorRT fp16의 몫**.
 
 ---
 

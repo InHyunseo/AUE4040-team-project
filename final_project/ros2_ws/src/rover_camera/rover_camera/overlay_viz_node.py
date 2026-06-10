@@ -19,7 +19,17 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
+
+# 실시간 오버레이 소비자용 QoS: 최신 프레임만(depth=1) + best-effort.
+# 모니터링 경로라 밀린 프레임은 버려 지연 누적을 끊는다(camera_node RELIABLE pub과 매칭).
+# 학습 bag을 저장하는 bag_recorder 는 RELIABLE 유지(완결성 필요) — 여기엔 쓰지 않는다.
+SENSOR_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 
 def _find_project_root() -> Path | None:
@@ -107,10 +117,10 @@ class OverlayVizNode(Node):
             CompressedImage, front_overlay_topic, 1
         )
         self.create_subscription(
-            CompressedImage, lane_topic, self._on_lane, 1
+            CompressedImage, lane_topic, self._on_lane, SENSOR_QOS
         )
         self.create_subscription(
-            CompressedImage, front_topic, self._on_front, 1
+            CompressedImage, front_topic, self._on_front, SENSOR_QOS
         )
 
         self._lane_msg: CompressedImage | None = None

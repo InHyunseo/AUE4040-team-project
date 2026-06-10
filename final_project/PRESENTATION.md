@@ -138,7 +138,9 @@ loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)
 - `MultiThreadedExecutor` + `ReentrantCallbackGroup` — 수신/추론/제어 스레드 분리(블로킹 방지).
 - 카메라 hot-path: jetcam **native BGR 그대로 JPEG 인코딩** → BGR↔RGB 왕복 제거.
   리더 스레드 분리, capture_fps 2배로 버퍼 신선.
-- DDS/QoS: `ROS_LOCALHOST_ONLY=1`로 외부 멀티캐스트 차단(지연↓), 이미지 토픽 QoS depth 축소.
+- DDS/QoS: `ROS_LOCALHOST_ONLY=1`로 외부 멀티캐스트 차단(지연↓). 이미지 토픽은
+  **실시간 소비자(모니터·오버레이·추론)만 BEST_EFFORT+depth1**로 옛 프레임 버려 지연 누적 차단
+  (트레이드오프 프레임 드롭). **학습 bag recorder는 RELIABLE 유지**(완결성). 처리시간 지연은 TensorRT fp16로 별도 해결.
 
 ### 데이터·코딩 기법
 - rosbag으로 compressed 토픽을 db3 하나에 저장(용량↓), Colab에선 `rosbags`로 ROS2 없이 파싱.

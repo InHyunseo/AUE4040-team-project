@@ -21,7 +21,19 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
+
+# 이미지 송신 QoS: depth=1 로 송신측이 옛 프레임을 들고 있지 않게 한다(지연 누적 방지).
+# reliability 는 RELIABLE 유지 — 학습 bag을 저장하는 bag_recorder(RELIABLE sub)와
+# 매칭되려면 pub 이 RELIABLE 이어야 한다(best-effort pub ↔ reliable sub 는 매칭 실패).
+# RELIABLE pub ↔ BEST_EFFORT 소비자(monitor/overlay/추론) sub 도 정상 매칭된다.
+# depth=1 이어도 RELIABLE 재전송/flow-control 은 별개라 recorder 완결성은 유지된다.
+IMAGE_PUB_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 sys.path.insert(0, "/home/ircv16/team")
 from calibration.camera import Camera  # noqa: E402
@@ -57,8 +69,8 @@ class CameraNode(Node):
         for cam, key in [(self.cam_lane, "lane"), (self.cam_front, "front")]:
             threading.Thread(target=self._reader, args=(cam, key), daemon=True).start()
 
-        self.pub_lane  = self.create_publisher(CompressedImage, "/lane_image/compressed",  10)
-        self.pub_front = self.create_publisher(CompressedImage, "/front_image/compressed", 10)
+        self.pub_lane  = self.create_publisher(CompressedImage, "/lane_image/compressed",  IMAGE_PUB_QOS)
+        self.pub_front = self.create_publisher(CompressedImage, "/front_image/compressed", IMAGE_PUB_QOS)
         self.timer = self.create_timer(1.0 / fps, self._tick)
         self._tick_i = 0
 
