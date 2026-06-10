@@ -30,11 +30,16 @@ freeze된 SegFormer/YOLO가 자동 생성한다.
 Phase 1과 동일한 스택 사용:
 
 ```bash
-# 터미널 A — 카메라 + 모터 + bag 레코더
+cd ~/team/final_project/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+
+# 터미널 A — 카메라 + 모터 + bag 레코더 http://192.168.0.123:8080/
+cd ~/team/final_project/ros2_ws && source install/setup.bash
 ros2 launch rover_recorder record.launch.py session_name:=phase2
 
 # 터미널 B — 키보드 텔레옵 (별도 SSH TTY)
-cd /home/ircv16/team/final_project/ros2_ws && source install/setup.bash
+cd ~/team/final_project/ros2_ws && source install/setup.bash
 ros2 run rover_teleop teleop_node
 ```
 
