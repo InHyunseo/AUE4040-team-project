@@ -22,10 +22,16 @@ sample (both within ±SYNC_TOL ns), then generates:
 Runs without ROS2 or camera hardware: rosbags + opencv + numpy + h5py
 + transformers (SegFormer) + ultralytics (YOLO).
 
+  # 단일 bag → 단일 h5
   python extract_labels.py --bag /path/to/rosbag2_dir \
       --segformer_ckpt ../models/segformer_lane \
       --yolo_weights ../models/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
+
+  # 여러 bag 일괄 → 폴더 안 각 bag 을 <out_dir>/<bag폴더명>.h5 로 (모델 1회 로드)
+  python extract_labels.py --bag_root /path/to/bags_parent \
+      --segformer_ckpt ../models/segformer_lane \
+      --out_dir ~/labels_all --device cuda
 
 SegFormer and YOLO are frozen (fine-tuned once in Phase 1). The H5 stores raw
 lane/front + seg/det separately; the dataloader composites the overlays
@@ -58,7 +64,13 @@ FRONT_TOPIC = "/front_image/compressed"
 CMD_TOPIC   = "/cmd_vel"
 
 SYNC_TOL_NS = 50_000_000      # 50 ms
-WP_HORIZON_S = 0.5
+# 로버 실측 속도가 ~0.22 m/s 로 느려(ipynb GT wp[-1]≈11cm@0.5s), 0.5s horizon
+# 이면 점들이 trivial 하게 뭉쳐 val wp loss~0 이 됐다. horizon 을 2.5s(5배)로
+# 늘려 끝점 ~55cm, 간격 0.5s≈11cm 로 벌려 직진/코너가 구분되는 의미있는 궤적을
+# 학습시킨다. 저속이라 2.5s 여도 공간적으로 짧아 현재 장면으로 예측 가능한 범위.
+# 점 수 WP_N 은 5 유지 — 기존 5점 모델과 출력 shape 호환(resume 가능).
+# 주의: horizon 만큼 각 bag 끝부분(2.5s 분량) 샘플이 cmd_vel 커버리지 부족으로 버려진다.
+WP_HORIZON_S = 2.5
 WP_N         = 5
 WP_DT        = WP_HORIZON_S / WP_N
 
@@ -251,7 +263,7 @@ def waypoint_gt(cmds: list[CmdSample], cmd_ts: list[int], t0_ns: int) -> np.ndar
     """Integrate cmd_vel from t0 to t0+horizon, sample at WP_N evenly spaced offsets.
 
     Uses the LAST cmd_vel command active in each integration sub-step (ZOH).
-    Returns (5,2) float32 in robot frame (x forward, y left) — or None if there
+    Returns (WP_N,2) float32 in robot frame (x forward, y left) — or None if there
     aren't enough future cmd_vel samples to cover the horizon.
     """
     horizon_ns = int(WP_HORIZON_S * 1e9)
@@ -372,55 +384,36 @@ def save_debug(path: Path, lane: np.ndarray, front: np.ndarray,
 # -------------------------------------------------------------------- main
 
 
-def main():
-    import h5py  # offline-only; not needed when importing frozen-model helpers
+def process_bag(bag_path, out_path, segmenter, det, debug_dir=None, limit=0):
+    """한 bag → 한 h5. segmenter/det 는 호출자가 1회 로드해 넘긴다(재로딩 방지).
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bag", required=True, type=Path)
-    ap.add_argument("--segformer_ckpt", type=Path, default=None,
-                    help="fine-tuned SegFormer lane checkpoint dir (required)")
-    ap.add_argument("--yolo_weights", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "models" / "best.pt",
-                    help="ultralytics YOLO best.pt (single-class car)")
-    ap.add_argument("--out", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "labels_cache.h5")
-    ap.add_argument("--debug_dir", type=Path, default=None,
-                    help="주면 검증용 디버그 PNG(~100장)를 저장. 생략하면 안 만든다.")
-    ap.add_argument("--limit", type=int, default=0, help="cap N frames (0=all)")
-    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    ap.add_argument("--skip_det", action="store_true", help="skip YOLO car detection")
-    args = ap.parse_args()
-
-    if args.segformer_ckpt is None:
-        raise SystemExit(
-            "--segformer_ckpt is required. Fine-tune SegFormer (Phase 1) first, "
-            "then pass the checkpoint dir.")
+    여러 bag 을 순회할 때 모델을 매번 다시 올리지 않도록 추출 코어를 함수로 분리했다.
+    반환: kept 프레임 수. bag 이 비어있으면 0 을 반환하고 건너뛴다(전체 중단 안 함).
+    """
+    import h5py  # offline-only
 
     lane_w, lane_h = LANE_SIZE
 
-    print(f"loading bag {args.bag} ...")
-    lane_msgs, front_msgs, cmds = load_bag(args.bag)
+    print(f"loading bag {bag_path} ...")
+    lane_msgs, front_msgs, cmds = load_bag(bag_path)
     print(f"  lane={len(lane_msgs)} front={len(front_msgs)} cmd_vel={len(cmds)}")
     if not lane_msgs or not front_msgs or not cmds:
-        raise RuntimeError("empty bag for one or more topics")
+        print(f"  [skip] empty bag for one or more topics: {bag_path}")
+        return 0
 
     front_cap = [cap for cap, _, _ in front_msgs]   # front 캡처시각 (lane↔front 매칭용)
     cmd_ts = [c.t_ns for c in cmds]
 
-    print(f"loading SegFormer {args.segformer_ckpt} ...")
-    segmenter = SegFormerLaneSeg(str(args.segformer_ckpt), device=args.device)
-    det = None if args.skip_det else YoloCarDet(str(args.yolo_weights), device=args.device)
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    if args.debug_dir is not None:
-        args.debug_dir.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     n_candidate = len(lane_msgs)
-    if args.limit:
-        n_candidate = min(n_candidate, args.limit)
+    if limit:
+        n_candidate = min(n_candidate, limit)
     debug_stride = max(1, n_candidate // 100)
 
-    with h5py.File(args.out, "w") as h5:
+    with h5py.File(out_path, "w") as h5:
         def dset(name, shape, dtype):
             return h5.create_dataset(
                 name, shape=(0,) + shape, maxshape=(None,) + shape,
@@ -471,8 +464,8 @@ def main():
             d_thr[kept] = v
             d_ts[kept] = cap_ns
 
-            if args.debug_dir is not None and kept % debug_stride == 0:
-                save_debug(args.debug_dir / f"frame_{kept:05d}.png",
+            if debug_dir is not None and kept % debug_stride == 0:
+                save_debug(debug_dir / f"frame_{kept:05d}.png",
                            lane, front, seg, det_arr, wps)
 
             kept += 1
@@ -483,11 +476,79 @@ def main():
         h5.attrs["wp_horizon_s"] = WP_HORIZON_S
         h5.attrs["wp_n"] = WP_N
         h5.attrs["seg_n_classes"] = SEG_N_CLASSES
-        h5.attrs["bag"] = str(args.bag)
+        h5.attrs["bag"] = str(bag_path)
 
-    print(f"done. kept={kept} -> {args.out}")
-    if args.debug_dir is not None:
-        print(f"debug samples -> {args.debug_dir}")
+    print(f"done. kept={kept} -> {out_path}")
+    if debug_dir is not None:
+        print(f"debug samples -> {debug_dir}")
+    return kept
+
+
+def find_bags(root: Path):
+    """root 아래의 rosbag2 디렉터리들을 찾는다(metadata.yaml 가 있는 폴더 = bag).
+
+    정렬된 리스트를 반환해 출력 h5 순서가 재현 가능하게 한다.
+    """
+    if (root / "metadata.yaml").exists():
+        return [root]                       # root 자체가 bag 인 경우
+    return sorted(p.parent for p in root.rglob("metadata.yaml"))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--bag", type=Path, help="단일 rosbag2 디렉터리")
+    src.add_argument("--bag_root", type=Path,
+                     help="여러 bag 이 든 폴더(재귀로 metadata.yaml 찾아 일괄 추출). "
+                          "각 bag → <out_dir>/<bag폴더명>.h5")
+    ap.add_argument("--segformer_ckpt", type=Path, default=None,
+                    help="fine-tuned SegFormer lane checkpoint dir (required)")
+    ap.add_argument("--yolo_weights", type=Path,
+                    default=Path(__file__).resolve().parents[1] / "models" / "best.pt",
+                    help="ultralytics YOLO best.pt (single-class car)")
+    ap.add_argument("--out", type=Path,
+                    default=Path(__file__).resolve().parents[1] / "labels_cache.h5",
+                    help="--bag 일 때 출력 h5 경로")
+    ap.add_argument("--out_dir", type=Path, default=None,
+                    help="--bag_root 일 때 h5 들을 모을 폴더(예: ~/labels_all). "
+                         "기본은 --bag_root 와 같은 폴더.")
+    ap.add_argument("--debug_dir", type=Path, default=None,
+                    help="주면 검증용 디버그 PNG(~100장)를 저장. 생략하면 안 만든다.")
+    ap.add_argument("--limit", type=int, default=0, help="cap N frames (0=all)")
+    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--skip_det", action="store_true", help="skip YOLO car detection")
+    args = ap.parse_args()
+
+    if args.segformer_ckpt is None:
+        raise SystemExit(
+            "--segformer_ckpt is required. Fine-tune SegFormer (Phase 1) first, "
+            "then pass the checkpoint dir.")
+
+    # 모델은 여기서 한 번만 로드해 모든 bag 에 재사용한다(일괄 추출의 핵심).
+    print(f"loading SegFormer {args.segformer_ckpt} ...")
+    segmenter = SegFormerLaneSeg(str(args.segformer_ckpt), device=args.device)
+    det = None if args.skip_det else YoloCarDet(str(args.yolo_weights), device=args.device)
+
+    if args.bag is not None:
+        process_bag(args.bag, args.out, segmenter, det,
+                    debug_dir=args.debug_dir, limit=args.limit)
+        return
+
+    # --bag_root: 폴더 안 모든 bag 을 순회, 각각 <out_dir>/<bag폴더명>.h5 로.
+    bags = find_bags(args.bag_root)
+    if not bags:
+        raise SystemExit(f"no rosbag2 (metadata.yaml) found under {args.bag_root}")
+    out_dir = args.out_dir or args.bag_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"found {len(bags)} bag(s) under {args.bag_root} -> {out_dir}")
+
+    total = 0
+    for k, bag in enumerate(bags, 1):
+        out_h5 = out_dir / f"{bag.name}.h5"
+        print(f"\n[{k}/{len(bags)}] {bag.name}")
+        total += process_bag(bag, out_h5, segmenter, det,
+                             debug_dir=args.debug_dir, limit=args.limit)
+    print(f"\nall done. {len(bags)} bag(s), total kept={total} -> {out_dir}")
 
 
 if __name__ == "__main__":

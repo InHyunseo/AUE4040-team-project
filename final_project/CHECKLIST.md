@@ -183,3 +183,26 @@ executor = MultiThreadedExecutor(num_threads=3)
 # Jetson에서 실행
 trtexec --onnx=model.onnx --saveEngine=model.engine --fp16
 ```
+
+---
+
+### 실차 추론 제어율(`ros2 topic hz /cmd_vel`)이 낮다
+**증상**: 제어 주기가 카메라 fps(15Hz)보다 한참 낮음. 차가 끊기거나 코너 반응 지연.
+
+**원인**: E2E 는 TRT 인데 **SegFormer/YOLO 는 아직 PyTorch** → 이 둘이 병목.
+제어율 = `min(카메라 fps, SegFormer+YOLO+engine 처리 속도)`.
+
+**판단 (먼저 측정 — 낮다고 다 문제 아님)**:
+
+- 13~15Hz: 정상.
+- 8~12Hz: 저속 주행(0.3m/s)이면 보통 OK. 실주행이 멀쩡하면 그냥 둔다(조기 최적화 금지).
+- 5Hz 이하 또는 주행이 끊김/코너 이탈: 아래 해결.
+- 안전은 watchdog 이 지킴 — 너무 느려 `cmd_timeout_s`(0.4s) 초과 시 자동 정지(폭주 X).
+
+**해결 (효과 큰 순서)**:
+
+1. **SegFormer 를 TensorRT 로 변환** (가장 효과 큼, fp16 2~4배). 단 E2E 처럼 공짜 아님:
+   onnx export(Transformer 라 op 호환 확인 필요) + 전처리(`SegformerImageProcessor`)를
+   numpy 로 재현 + 추론 노드에 SegFormer 용 TRTEngine 추가. 반나절 작업 + fp16 세그 품질 검증.
+2. **YOLO 격프레임 실행** — 차가 자주 안 나오니 2~3프레임에 1번만, 나머지는 직전 bbox 재사용.
+3. 입력 해상도 ↓(224→160) 또는 더 작은 백본 — 재학습 필요, 최후 수단.

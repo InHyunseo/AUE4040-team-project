@@ -1,0 +1,99 @@
+"""Autonomous-driving bringup (Phase 3).
+
+Camera + motor bridge + E2E inference. The inference counterpart of
+rover_recorder/record.launch.py: same camera + motor_bridge, but the bag
+recorder is dropped and the E2E inference node replaces manual teleop.
+
+Usage:
+  # camera + motor + autonomous inference
+  ros2 launch rover_lane drive.launch.py
+
+  # final run: drop the browser monitor to free resources
+  ros2 launch rover_lane drive.launch.py monitor:=false
+
+  # dry run the motor bridge (no UART), watch http://<host>:8080/
+  ros2 launch rover_lane drive.launch.py dry_run:=true
+"""
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description() -> LaunchDescription:
+    fps = LaunchConfiguration("fps")
+    dry_run = LaunchConfiguration("dry_run")
+    monitor = LaunchConfiguration("monitor")
+    monitor_host = LaunchConfiguration("monitor_host")
+    monitor_port = LaunchConfiguration("monitor_port")
+    engine_path = LaunchConfiguration("engine_path")
+    segformer_ckpt = LaunchConfiguration("segformer_ckpt")
+    yolo_weights = LaunchConfiguration("yolo_weights")
+    device = LaunchConfiguration("device")
+    max_rate_hz = LaunchConfiguration("max_rate_hz")
+    watchdog_hz = LaunchConfiguration("watchdog_hz")
+    cmd_timeout_s = LaunchConfiguration("cmd_timeout_s")
+
+    return LaunchDescription([
+        DeclareLaunchArgument("fps", default_value="15"),
+        DeclareLaunchArgument("dry_run", default_value="false",
+                              description="motor_bridge dry run (no UART)"),
+        DeclareLaunchArgument("monitor", default_value="true",
+                              description="launch the browser MJPEG monitor"),
+        DeclareLaunchArgument("monitor_host", default_value="0.0.0.0",
+                              description="monitor bind host (127.0.0.1 = local only)"),
+        DeclareLaunchArgument("monitor_port", default_value="8080"),
+        DeclareLaunchArgument("engine_path", default_value="",
+                              description="TensorRT e2e.engine path (empty = "
+                                          "<project>/models/e2e.engine)"),
+        DeclareLaunchArgument("segformer_ckpt", default_value="",
+                              description="SegFormer ckpt dir (empty = default)"),
+        DeclareLaunchArgument("yolo_weights", default_value="",
+                              description="YOLO best.pt path (empty = default)"),
+        DeclareLaunchArgument("device", default_value="cuda"),
+        DeclareLaunchArgument("max_rate_hz", default_value="30.0",
+                              description="inference rate cap (keep above camera "
+                                          "rate; effectively infer-every-frame)"),
+        DeclareLaunchArgument("watchdog_hz", default_value="20.0",
+                              description="steady republish + deadman rate"),
+        DeclareLaunchArgument("cmd_timeout_s", default_value="0.4",
+                              description="stop if no inference within this window"),
+
+        # Camera (same as record.launch).
+        Node(package="rover_camera", executable="camera_node",
+             name="rover_camera", output="screen",
+             parameters=[{"fps": fps}]),
+
+        # Browser monitor: raw lane/front streams (no overlay topics here — the
+        # E2E node composites internally and doesn't publish overlays).
+        Node(package="rover_camera", executable="monitor_node",
+             name="rover_monitor", output="screen",
+             condition=IfCondition(monitor),
+             parameters=[{
+                 "host": monitor_host,
+                 "port": monitor_port,
+                 "streams": [
+                     "lane:/lane_image/compressed",
+                     "front:/front_image/compressed",
+                 ],
+             }]),
+
+        # Motor bridge (same as record.launch) — drives /cmd_vel over UART.
+        Node(package="rover_recorder", executable="motor_bridge_node",
+             name="motor_bridge", output="screen",
+             parameters=[{"dry_run": dry_run}]),
+
+        # E2E inference -> /cmd_vel.
+        Node(package="rover_lane", executable="e2e_infer_node",
+             name="rover_e2e_infer", output="screen",
+             parameters=[{
+                 "engine_path": engine_path,
+                 "segformer_ckpt": segformer_ckpt,
+                 "yolo_weights": yolo_weights,
+                 "device": device,
+                 "max_rate_hz": max_rate_hz,
+                 "watchdog_hz": watchdog_hz,
+                 "cmd_timeout_s": cmd_timeout_s,
+             }]),
+    ])

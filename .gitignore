@@ -24,5 +24,9 @@ logs/
 *.onnx
 *.engine
 *.cache
+# E2E 학습 체크포인트 — optimizer state 포함 269MB+, GitHub 100MB 리밋 초과.
+# 드라이브/Kaggle/릴리스로 공유한다. (best.pt(YOLO 5M)·segformer_lane 은 작아서 추적 유지)
+final_project/models/e2e_best.pt
+final_project/models/*_best.pt
 final_project/rover_data/*
 !final_project/rover_data/.gitkeep

@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torchvision.models import resnet18, ResNet18_Weights
 
 
-# waypoint: 미래 0.5초를 5점으로 (extract_labels.WP_N, WP_HORIZON_S와 일치)
+# waypoint: 미래 2.5초를 5점으로 (extract_labels.WP_N, WP_HORIZON_S와 일치)
 WP_N = 5
 
 
@@ -144,7 +144,7 @@ class WaypointHead(nn.Module):
     출력: waypoints (B, 5, 2)  meters, 로봇 프레임 (x_forward, y_left)
 
     ControlHead와 동일한 구조를 미러하되:
-    - 최종 레이어 Linear(64, 10) → (B, 5, 2)로 reshape
+    - 최종 레이어 Linear(64, WP_N*2=10) → (B, 5, 2)로 reshape
     - Tanh 없음 (waypoint는 미터 단위 unbounded 회귀값)
 
     역할: steer/throttle과 같은 backbone feature를 멀티스텝 의도 표현 쪽으로

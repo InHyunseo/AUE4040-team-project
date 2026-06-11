@@ -21,7 +21,10 @@ SEG_COLORS = [(0, 0, 255),     # left-solid    - red
               (255, 0, 0)]     # center-dashed - blue
 
 # Display-only scale for drawing metric waypoints (labels are in meters).
-DEBUG_PPM = 200.0
+# WP_HORIZON_S 2.5s 면 끝점 ~0.55m. 기존 200 ppm 으로는 점이 224px 밖으로
+# 나가므로 180 으로 낮춰 0.55m(≈99px)가 화면 안에 들어오게 한다.
+# (디스플레이 전용 — 라벨/학습 좌표는 미터 단위 그대로라 영향 없음.)
+DEBUG_PPM = 180.0
 
 
 def overlay_seg(lane: np.ndarray, seg: np.ndarray) -> np.ndarray:
