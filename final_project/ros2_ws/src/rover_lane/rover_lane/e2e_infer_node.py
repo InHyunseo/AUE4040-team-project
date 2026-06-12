@@ -111,17 +111,24 @@ class TRTEngine:
 
     Loads e2e.engine (built by `trtexec --onnx=e2e.onnx --fp16`), runs a single
     forward with two image inputs (lane, front) and returns the named outputs.
-    Inputs/outputs are matched by binding name so engine I/O order changes don't
-    silently break the mapping. CUDA context is created on the calling thread.
+    Inputs/outputs are matched by tensor name so engine I/O order changes don't
+    silently break the mapping.
+
+    Uses the TensorRT 10 I/O-tensor API (num_io_tensors / get_tensor_name /
+    set_input_shape / set_tensor_address / execute_async_v3); the old binding
+    API (num_bindings / get_binding_* / execute_v2-with-bindings) was removed in
+    TRT 10. Device buffers are PyTorch CUDA tensors — torch is already a hard
+    dependency here (SegFormer/YOLO run on cuda), so this avoids needing pycuda
+    or cuda-python and reuses torch's CUDA context/allocator.
     """
 
-    def __init__(self, engine_path: str):
+    def __init__(self, engine_path: str, device: str = "cuda"):
         import tensorrt as trt
-        import pycuda.driver as cuda
-        import pycuda.autoinit  # noqa: F401  (creates + manages CUDA context)
+        import torch
 
         self.trt = trt
-        self.cuda = cuda
+        self.torch = torch
+        self.device = torch.device(device)
 
         logger = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(logger) as rt:
@@ -130,67 +137,61 @@ class TRTEngine:
             raise RuntimeError(f"failed to deserialize TRT engine: {engine_path}")
         self.context = self.engine.create_execution_context()
 
-        # Discover binding names/roles. The exporter names inputs lane/front and
+        # Discover tensor names/roles. The exporter names inputs lane/front and
         # outputs steer/throttle/waypoints (export_onnx.py dynamic_axes keys).
         self.input_names = []
         self.output_names = []
-        for i in range(self.engine.num_bindings):
-            name = self.engine.get_binding_name(i)
-            if self.engine.binding_is_input(i):
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
                 self.input_names.append(name)
             else:
                 self.output_names.append(name)
 
-    def _binding_shape(self, name):
-        idx = self.engine.get_binding_index(name)
-        return tuple(self.context.get_binding_shape(idx))
+        # Dedicated stream so enqueueV3 doesn't fall back to the default stream
+        # (TRT warns + adds extra syncs otherwise).
+        self.stream = torch.cuda.Stream(self.device)
+
+        # Persistent device buffers, allocated once from the static engine shapes
+        # (batch 1). Inputs are filled in-place each call; outputs are read back.
+        self._buf = {}
+        for name in self.input_names:
+            shape = tuple(self.engine.get_tensor_shape(name))
+            t = torch.empty(shape, dtype=torch.float32, device=self.device)
+            self.context.set_input_shape(name, shape)
+            self.context.set_tensor_address(name, t.data_ptr())
+            self._buf[name] = t
+        for name in self.output_names:
+            shape = tuple(self.context.get_tensor_shape(name))
+            t = torch.empty(shape, dtype=torch.float32, device=self.device)
+            self.context.set_tensor_address(name, t.data_ptr())
+            self._buf[name] = t
 
     def infer(self, lane_chw: np.ndarray, front_chw: np.ndarray) -> dict:
         """lane/front (3,224,224) float32 -> {output_name: np.ndarray}.
 
-        Adds the batch dim, copies H2D, runs, copies D2H. Single-sample only.
+        Adds the batch dim, copies H2D into the persistent buffers, runs, copies
+        D2H. Single-sample only. Inputs are matched to the engine's lane/front
+        tensors by name when present, else by I/O order.
         """
-        cuda = self.cuda
-        feeds = {
-            self.input_names[0]: lane_chw[None].astype(np.float32),
-            self.input_names[1]: front_chw[None].astype(np.float32),
-        }
-        # If the exporter happens to name inputs explicitly, honor the names.
+        torch = self.torch
         if "lane" in self.input_names and "front" in self.input_names:
-            feeds = {
-                "lane": lane_chw[None].astype(np.float32),
-                "front": front_chw[None].astype(np.float32),
-            }
+            feeds = {"lane": lane_chw, "front": front_chw}
+        else:
+            feeds = {self.input_names[0]: lane_chw, self.input_names[1]: front_chw}
 
-        bindings = [0] * self.engine.num_bindings
-        device_buffers = []
-        host_outputs = {}
-
-        for name, arr in feeds.items():
-            arr = np.ascontiguousarray(arr)
-            idx = self.engine.get_binding_index(name)
-            self.context.set_binding_shape(idx, arr.shape)
-            dptr = cuda.mem_alloc(arr.nbytes)
-            cuda.memcpy_htod(dptr, arr)
-            bindings[idx] = int(dptr)
-            device_buffers.append(dptr)
-
-        for name in self.output_names:
-            idx = self.engine.get_binding_index(name)
-            shape = tuple(self.context.get_binding_shape(idx))
-            host = np.empty(shape, dtype=np.float32)
-            dptr = cuda.mem_alloc(host.nbytes)
-            bindings[idx] = int(dptr)
-            device_buffers.append(dptr)
-            host_outputs[name] = (host, dptr)
-
-        self.context.execute_v2(bindings)
-
-        out = {}
-        for name, (host, dptr) in host_outputs.items():
-            cuda.memcpy_dtoh(host, dptr)
-            out[name] = host
-        return out
+        with torch.cuda.stream(self.stream):
+            for name, arr in feeds.items():
+                src = torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32))
+                # copy into the [1,3,224,224] persistent buffer (drop/keep batch)
+                self._buf[name].copy_(src.reshape(self._buf[name].shape),
+                                      non_blocking=True)
+            ok = self.context.execute_async_v3(self.stream.cuda_stream)
+            if not ok:
+                raise RuntimeError("TensorRT execute_async_v3 returned False")
+            outs = {name: self._buf[name].clone() for name in self.output_names}
+        self.stream.synchronize()
+        return {name: t.cpu().numpy() for name, t in outs.items()}
 
 
 # ----------------------------------------------------------------- the ROS node
@@ -288,7 +289,7 @@ class E2EInferNode(Node):
         try:
             self.segmenter = SegFormerLaneSeg(self.seg_ckpt, device=self.device)
             self.detector = YoloCarDet(self.yolo_weights, device=self.device)
-            self.engine = TRTEngine(self.engine_path)
+            self.engine = TRTEngine(self.engine_path, device=self.device)
             self.ready = True
             self.get_logger().info(
                 f"models ready (engine inputs={self.engine.input_names}, "
