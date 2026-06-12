@@ -234,6 +234,15 @@ class E2EInferNode(Node):
         # (no callback fires) and the rover would otherwise keep its last command.
         self.declare_parameter("watchdog_hz", 20.0)
         self.declare_parameter("cmd_timeout_s", 0.4)
+        # Steering smoothing — MUST mirror teleop. The training cmd_vel was
+        # produced by teleop_node, which ran every raw target through approach()
+        # at SMOOTH_ALPHA=0.35 on a 20 Hz tick. Raw per-frame model steer that
+        # jumps frame-to-frame therefore looks nothing like the smoothed values
+        # the model trained on, and the motor sees that as "stuttering" turns.
+        # We replay the same low-pass here: inference stores a *target*, the
+        # watchdog (also ~20 Hz, like teleop) eases the published command toward
+        # it each tick. smooth_alpha=0.0 disables it (publish target directly).
+        self.declare_parameter("smooth_alpha", 0.35)
 
         self.lane_topic = self.get_parameter("lane_topic").value
         self.front_topic = self.get_parameter("front_topic").value
@@ -247,6 +256,7 @@ class E2EInferNode(Node):
         self.stale_timeout_s = float(self.get_parameter("stale_timeout_s").value)
         self.min_period = 1.0 / max(1e-3, float(self.get_parameter("max_rate_hz").value))
         self.cmd_timeout_s = float(self.get_parameter("cmd_timeout_s").value)
+        self.smooth_alpha = min(1.0, max(0.0, float(self.get_parameter("smooth_alpha").value)))
         watchdog_hz = max(1e-3, float(self.get_parameter("watchdog_hz").value))
 
         self.pub_cmd = self.create_publisher(Twist, self.cmd_topic, 10)
@@ -257,10 +267,16 @@ class E2EInferNode(Node):
         self._front_bgr = None
         self._front_t = 0.0
         self._last_pub_t = 0.0
-        # Last command produced by inference + when it was produced. The watchdog
-        # timer republishes this (and stops if it goes stale). Guarded by _lock.
-        self._last_cmd = Twist()
+        # Latest TARGET command produced by inference + when it was produced. The
+        # watchdog eases the published command toward this target each tick (see
+        # smooth_alpha) and stops if it goes stale. Guarded by _lock.
+        self._tgt_lin = 0.0
+        self._tgt_ang = 0.0
         self._last_cmd_t = 0.0
+        # Eased current command (what we actually publish). Only the watchdog
+        # touches these, so they need no lock.
+        self._cur_lin = 0.0
+        self._cur_ang = 0.0
 
         self.create_subscription(
             CompressedImage, self.front_topic, self._on_front, SENSOR_QOS)
@@ -340,9 +356,10 @@ class E2EInferNode(Node):
                                     throttle_duration_sec=1.0)
             return
 
-        # Publish immediately for responsiveness AND store as the latest command
-        # so the watchdog can republish it at a steady rate until the next frame.
-        self._publish_cmd(steer, throttle)
+        # Store as the latest TARGET. The watchdog (20 Hz, like teleop) eases the
+        # actually-published command toward it — we do NOT publish raw here, so
+        # there's a single smoothed output path matching the training cmd_vel.
+        self._set_target(steer, throttle)
         self._last_pub_t = now
 
     # ---- core ----
@@ -391,51 +408,61 @@ class E2EInferNode(Node):
             return np.asarray(out[scalars[0]]).ravel()[0], np.asarray(out[scalars[1]]).ravel()[0]
         raise RuntimeError(f"cannot locate steer/throttle in engine outputs: {list(out)}")
 
-    def _publish_cmd(self, steer: float, throttle: float) -> None:
-        """Map model steer -> Twist using the training control contract.
+    def _set_target(self, steer: float, throttle: float) -> None:
+        """Map model steer -> target Twist using the training control contract.
 
         From model.py ControlHead docstring (throttle output is intentionally
         NOT used for cmd_vel; speed is coupled to |steer|, matching teleop):
           linear.x  = -(0.20 + |steer| * 0.05)   # negative = forward on this rover
           angular.z = steer * 1.2
-        Publishes now and records it as the latest command for the watchdog.
+        Stores the target; the watchdog eases the published command toward it.
         """
         steer = max(-1.0, min(1.0, steer))
-        cmd = Twist()
-        cmd.linear.x = -(0.20 + abs(steer) * 0.05)
-        cmd.angular.z = steer * 1.2
-        self.pub_cmd.publish(cmd)
         with self._lock:
-            self._last_cmd = cmd
+            self._tgt_lin = -(0.20 + abs(steer) * 0.05)
+            self._tgt_ang = steer * 1.2
             self._last_cmd_t = self._now()
 
     def _publish_stop(self) -> None:
+        # Reset the eased state too, so when driving resumes we don't ease up
+        # from a stale mid-turn value.
+        self._cur_lin = 0.0
+        self._cur_ang = 0.0
         self.pub_cmd.publish(Twist())  # all-zero = motor_bridge stops
 
     def _watchdog(self) -> None:
-        """Steady-rate republish + deadman stop (independent of frame callbacks).
+        """Steady-rate smoothing + republish + deadman stop (frame-independent).
 
-        - If the last inference command is fresh (< cmd_timeout_s), republish it
-          so motor_bridge sees a steady ~watchdog_hz stream even between frames.
-        - If it's stale (lane stream died, inference hung, models still loading),
-          publish a hard stop. This is the only path that catches a fully dead
-          lane topic, since _on_lane wouldn't fire at all in that case.
+        This is the single output path (inference only sets a target). Each tick:
+        - If the latest target is fresh (< cmd_timeout_s), ease the published
+          command toward it via approach() at smooth_alpha — the same low-pass
+          teleop applied at 20 Hz, so the published cmd_vel matches the smoothed
+          distribution the model trained on (no per-frame steer jumps -> no
+          "stuttering" turns) and motor_bridge sees a steady ~watchdog_hz stream.
+        - If the target is stale (lane stream died, inference hung, models still
+          loading), publish a hard stop. This is the only path that catches a
+          fully dead lane topic, since _on_lane wouldn't fire at all then.
 
         Note: the node runs on the default single-threaded executor, so this
-        timer cannot preempt an in-flight inference — it fires in the gaps
-        between frame callbacks. That's fine: _on_lane already publishes on every
-        successful inference, so the watchdog's job is steady republish between
-        frames + the deadman stop when callbacks stop firing entirely (where a
-        single thread is not a limitation, because nothing else is running then).
+        timer fires in the gaps between frame callbacks, never preempting an
+        in-flight inference. That's fine — when callbacks stop firing entirely,
+        nothing else is running, so the deadman stop still gets to fire.
         """
         now = self._now()
         with self._lock:
-            cmd = self._last_cmd
+            tgt_lin = self._tgt_lin
+            tgt_ang = self._tgt_ang
             age = now - self._last_cmd_t
         if not self.ready or age > self.cmd_timeout_s:
             self._publish_stop()
-        else:
-            self.pub_cmd.publish(cmd)
+            return
+        a = self.smooth_alpha
+        self._cur_lin += (tgt_lin - self._cur_lin) * a
+        self._cur_ang += (tgt_ang - self._cur_ang) * a
+        cmd = Twist()
+        cmd.linear.x = float(self._cur_lin)
+        cmd.angular.z = float(self._cur_ang)
+        self.pub_cmd.publish(cmd)
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9

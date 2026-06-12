@@ -34,6 +34,7 @@ def generate_launch_description() -> LaunchDescription:
     max_rate_hz = LaunchConfiguration("max_rate_hz")
     watchdog_hz = LaunchConfiguration("watchdog_hz")
     cmd_timeout_s = LaunchConfiguration("cmd_timeout_s")
+    smooth_alpha = LaunchConfiguration("smooth_alpha")
 
     return LaunchDescription([
         DeclareLaunchArgument("fps", default_value="15"),
@@ -59,6 +60,10 @@ def generate_launch_description() -> LaunchDescription:
                               description="steady republish + deadman rate"),
         DeclareLaunchArgument("cmd_timeout_s", default_value="0.4",
                               description="stop if no inference within this window"),
+        DeclareLaunchArgument("smooth_alpha", default_value="0.35",
+                              description="steer low-pass per watchdog tick "
+                                          "(matches teleop SMOOTH_ALPHA; 0=off, "
+                                          "lower=smoother/laggier, higher=snappier)"),
 
         # Camera (same as record.launch).
         Node(package="rover_camera", executable="camera_node",
@@ -95,5 +100,6 @@ def generate_launch_description() -> LaunchDescription:
                  "max_rate_hz": max_rate_hz,
                  "watchdog_hz": watchdog_hz,
                  "cmd_timeout_s": cmd_timeout_s,
+                 "smooth_alpha": smooth_alpha,
              }]),
     ])

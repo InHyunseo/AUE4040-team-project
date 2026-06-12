@@ -172,6 +172,22 @@ executor = MultiThreadedExecutor(num_threads=3)
 
 ## 배포
 
+### 자율주행 시 코너에서 조향이 뚝뚝 끊긴다 (느리거나 계단식)
+**증상**: 코너를 보고 돌긴 도는데 angular.z가 계단식으로 점프 → 모터가 끊기는 느낌. 제어율(`ros2 topic hz /cmd_vel`)은 정상(20Hz)인데도 끊김.
+
+**원인**: 학습 cmd_vel은 teleop이 `approach()`(SMOOTH_ALPHA=0.35, 20Hz)로 **저역통과한 연속값**인데, 추론 노드가 모델 steer를 **프레임마다 raw로 그대로 발행**하면 분포가 다르고 매 프레임 점프가 그대로 모터에 전달됨.
+
+**해결**:
+
+- 추론 노드도 teleop과 **동일한 smoothing**을 적용. raw 출력은 *목표값*으로 저장하고, watchdog 타이머(20Hz)가 매 틱 `approach(cur, target, alpha)`로 발행 명령을 당김 → 학습 분포와 일치 + 끊김 제거.
+- `smooth_alpha` 파라미터로 튜닝: `0`=off(raw), `0.35`=teleop과 동일(권장). 낮을수록 부드럽지만 반응 지연, 높을수록 민첩하지만 끊김.
+
+```bash
+ros2 launch rover_lane drive.launch.py smooth_alpha:=0.35   # 기본값
+```
+
+---
+
 ### Colab에서 만든 TRT engine이 Jetson에서 동작 안 한다
 **원인**: 노트북/WSL에서 만든 engine은 GPU 아키텍처가 달라 Jetson에서 사용 불가
 
