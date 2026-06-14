@@ -134,6 +134,9 @@ def main():
     # 학습/시각화에서 고친다. 새 부호로 재추출한 H5 엔 끈다(이중 반전 방지).
     ap.add_argument("--wp_fix_sign", action="store_true",
                     help="flip waypoint x for legacy (pre-sign-fix) H5")
+    # 좌우 flip aug (train 만). 이미지+seg채널교환+det+steer+wp 일관 반전, 50% 확률.
+    # 데이터 2배 + 좌우 균형으로 steer 과적합을 완화한다.
+    ap.add_argument("--hflip", action="store_true", help="50% horizontal flip aug (train)")
     args = ap.parse_args()
 
     device = args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu"
@@ -149,14 +152,22 @@ def main():
 
     train_ds = E2EDataset(cache_paths, indices=train_idx, augment=True,
                           seed=args.seed, steer_smooth=args.steer_smooth,
-                          wp_fix_sign=args.wp_fix_sign)
+                          wp_fix_sign=args.wp_fix_sign, hflip=args.hflip)
     val_ds   = E2EDataset(cache_paths, indices=val_idx, augment=False,
                           seed=args.seed, steer_smooth=args.steer_smooth,
-                          wp_fix_sign=args.wp_fix_sign)
+                          wp_fix_sign=args.wp_fix_sign, hflip=False)  # val 은 원본
+
+    # 워커별 numpy 재시드: PyTorch 는 torch/random 만 워커 시드하고 np.random 은
+    # 안 해줘서, 안 하면 모든 워커가 같은 flip/jitter 패턴을 내 다양성이 준다.
+    def _seed_worker(worker_id):
+        import torch as _t
+        seed = (_t.initial_seed() + worker_id) % (2 ** 32)
+        np.random.seed(seed)
 
     pin = device == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                              num_workers=args.workers, pin_memory=pin, drop_last=True)
+                              num_workers=args.workers, pin_memory=pin, drop_last=True,
+                              worker_init_fn=_seed_worker)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
                             num_workers=args.workers, pin_memory=pin)
 

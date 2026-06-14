@@ -78,6 +78,41 @@ def to_input_tensor(img_bgr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(rgb.transpose(2, 0, 1).copy())
 
 
+def hflip_sample(lane, front, seg, det, steer, throttle, wp):
+    """좌우(수평) flip — 한 샘플의 이미지·라벨을 일관되게 반전한다.
+
+    합성 **전** raw 단계에서 호출해야 한다(합성 후 flip 하면 오버레이 색까지
+    꼬임). 반전 규칙(좌우 대칭만, 전방 성분은 불변):
+      lane/front : 좌우 반전 (가로축)
+      seg        : 좌실선(ch0)↔우실선(ch1) **채널 교환** + 각 채널 좌우 반전.
+                   중앙점선(ch2)은 교환 없이 좌우 반전만.
+      det bbox   : x → W-(x+w) 로 미러 (y,w,h,conf 불변). 차 없으면(conf<=0) 그대로.
+      steer(ang.z): 부호 반전 (좌회전↔우회전)
+      throttle   : 불변 (전진속도는 좌우 무관)
+      waypoint   : y 부호 반전(좌↔우), x(전방) 불변
+
+    flip(flip(x)) == x 가 성립한다(단위 테스트로 보장)."""
+    W = lane.shape[1]
+    lane_f  = lane[:, ::-1].copy()
+    front_f = front[:, ::-1].copy()
+
+    # seg: 좌/우 실선 채널 교환 후, 모든 채널 가로 반전.
+    seg_f = seg[:, :, ::-1].copy()
+    seg_f[[0, 1]] = seg_f[[1, 0]]   # ch0(좌실선) ↔ ch1(우실선)
+
+    det_f = det.copy()
+    if det_f[4] > 0:
+        x, w = det_f[0], det_f[2]
+        det_f[0] = W - (x + w)      # 좌상단 x 미러; w,h,conf 그대로
+
+    steer_f = -steer
+    throttle_f = throttle
+    wp_f = wp.copy()
+    wp_f[:, 1] *= -1.0              # y(좌우) 반전, x(전방) 유지
+
+    return lane_f, front_f, seg_f, det_f, steer_f, throttle_f, wp_f
+
+
 def _color_jitter(img_bgr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     """보수적 색상 jitter (밝기/대비/채도). 기하 변형 없음 — steer/waypoint GT 보존.
 
@@ -112,11 +147,14 @@ class E2EDataset(Dataset):
     h5py.File 은 워커별로 lazy open (멀티프로세싱 안전)."""
 
     def __init__(self, h5_paths, indices=None, augment=False, seed=0,
-                 steer_smooth=0, wp_fix_sign=False):
+                 steer_smooth=0, wp_fix_sign=False, hflip=False):
         if isinstance(h5_paths, (str, Path)):
             h5_paths = [h5_paths]
         self.h5_paths = [str(p) for p in h5_paths]
         self.augment = augment
+        # hflip: 50% 확률 좌우 flip (이미지+seg채널교환+det+steer+wp 일관 반전).
+        # train 만 켜고 val 은 끈다(평가는 원본 분포). 데이터 2배 + 좌우 균형.
+        self.hflip = bool(hflip)
         self.seed = seed
         self.steer_smooth = int(steer_smooth)
         # wp_fix_sign: 부호 버그 시절 추출된 옛 H5 의 waypoint 를 즉석 보정.
@@ -183,13 +221,20 @@ class E2EDataset(Dataset):
             wp = wp.copy()
             wp[:, 0] *= -1.0   # 옛 부호 보정: x(전방)만 반전, y(좌우)는 그대로
 
+        # 좌우 flip: 합성 **전** raw 단계에서 모든 라벨 일관 반전 (50% 확률).
+        # epoch 마다 다시 동전을 던져야(고정 seed X) 같은 샘플을 원본/거울상 둘 다
+        # 본다 → 유효 다양성 2배. np.random(전역, 워커별 시드됨)을 그대로 쓴다.
+        if self.hflip and np.random.random() < 0.5:
+            lane, front, seg, det, steer, thr, wp = hflip_sample(
+                lane, front, seg, det, steer, thr, wp)
+
         lane_c  = composite_lane(lane, seg)
         front_c = composite_front(front, det)
 
         if self.augment:
-            rng = np.random.default_rng(self.seed + gidx)
-            lane_c  = _color_jitter(lane_c, rng)
-            front_c = _color_jitter(front_c, rng)
+            # epoch 마다 다른 jitter (전역 np.random, 워커별 재시드됨) — flip 과 동일 정책.
+            lane_c  = _color_jitter(lane_c, np.random)
+            front_c = _color_jitter(front_c, np.random)
 
         lane_t  = to_input_tensor(lane_c)
         front_t = to_input_tensor(front_c)
