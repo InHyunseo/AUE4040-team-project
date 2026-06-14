@@ -188,9 +188,13 @@ def main():
         model.load_state_dict(ck["model"] if "model" in ck else ck)
         if isinstance(ck, dict) and "optimizer" in ck:
             optimizer.load_state_dict(ck["optimizer"])
-        if isinstance(ck, dict) and "val_total" in ck:
-            best_val = float(ck["val_total"])
-        print(f"resumed from {args.resume} (epoch={ck.get('epoch')} val_total={best_val:.4f})")
+        # scheduler state 복원 (없으면 cosine 이 epoch0 부터 재시작해 LR 틀어짐).
+        if isinstance(ck, dict) and "scheduler" in ck:
+            scheduler.load_state_dict(ck["scheduler"])
+        # best 기준은 val steer (실제 구동 신호). 옛 체크포인트는 val_steer 키가 있음.
+        if isinstance(ck, dict) and "val_steer" in ck:
+            best_val = float(ck["val_steer"])
+        print(f"resumed from {args.resume} (epoch={ck.get('epoch')} best_steer={best_val:.4f})")
 
     args_meta = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
     args_meta["cache"] = cache_paths
@@ -209,21 +213,25 @@ def main():
               f"val {va['total']:.4f} (s{va['steer']:.4f} t{va['throttle']:.4f} w{va['wp']:.4f})  "
               f"lr {lr_now:.2e}  {dt:.0f}s")
 
-        improved = va["total"] < best_val - 1e-5
+        # best/early-stop 은 val *steer* 기준. steer 만 실제 구동에 쓰이므로(throttle 은
+        # |steer| 로 재구성, waypoint 는 추론 미사용) total 로 고르면 잡음 큰 wp/throttle
+        # 이 steer-최적 아닌 epoch 를 고른다.
+        improved = va["steer"] < best_val - 1e-5
         if improved:
-            best_val = va["total"]
+            best_val = va["steer"]
             bad = 0
             torch.save({
                 "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),   # --resume 용
+                "optimizer": optimizer.state_dict(),    # --resume 용
+                "scheduler": scheduler.state_dict(),    # --resume 시 LR 복원
                 "epoch": epoch,
-                "val_total": best_val,
+                "val_total": va["total"],
                 "val_steer": va["steer"],
                 "val_throttle": va["throttle"],
                 "val_wp": va["wp"],
                 "args": args_meta,
             }, args.out)
-            print(f"    ↳ new best val={best_val:.4f}  saved {args.out}")
+            print(f"    ↳ new best val_steer={best_val:.4f}  saved {args.out}")
         else:
             bad += 1
 
@@ -235,7 +243,7 @@ def main():
             print(f"early stop at epoch {epoch} (no val improvement for {args.patience})")
             break
 
-    print(f"done. best val total={best_val:.4f}  -> {args.out}")
+    print(f"done. best val_steer={best_val:.4f}  -> {args.out}")
     print("next: export_onnx.py --ckpt", args.out)
 
 

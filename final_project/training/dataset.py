@@ -46,6 +46,13 @@ BBOX_THICK = 2
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
+# steer 정규화 스케일 = teleop MAX_OMEGA. extract_labels 는 angular.z(∈[-1.2,1.2])를
+# raw 로 저장하는데 ControlHead 끝이 Tanh(∈[-1,1]) 라, raw 를 그대로 타깃으로 쓰면
+# |steer|>1 인 급코너 프레임이 도달 불가 → tanh 포화로 steer loss 에 영구 floor.
+# steer/STEER_SCALE 로 [-1,1] 에 맞춘 뒤 학습한다(추론 노드는 angular.z=steer*1.2 로
+# 역변환하므로 일관). 옛 체크포인트와는 타깃 스케일이 달라 resume 불가(재학습 필요).
+STEER_SCALE = 1.2
+
 
 def composite_lane(lane_bgr: np.ndarray, seg: np.ndarray) -> np.ndarray:
     """raw lane(BGR uint8) 에 seg 3채널을 색으로 alpha-blend. 반환 BGR uint8."""
@@ -215,6 +222,9 @@ class E2EDataset(Dataset):
             steer = float(self._steer_lut[fi][li])   # 세션 내부 ±k 이동평균
         else:
             steer = float(f["steer"][li])
+        # raw angular.z(∈[-1.2,1.2]) → tanh 범위 [-1,1] 로 정규화 + 안전 clamp.
+        # (smoothing/전이로 |값|>1.2 가 드물게 나와도 clamp 로 막는다.)
+        steer = float(np.clip(steer / STEER_SCALE, -1.0, 1.0))
         thr   = float(f["throttle"][li])
         wp    = f["waypoint"][li].astype(np.float32)  # (5,2)
         if self.wp_fix_sign:
