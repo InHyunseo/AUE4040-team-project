@@ -28,7 +28,7 @@ Runs without ROS2 or camera hardware: rosbags + opencv + numpy + h5py
       --yolo_weights ../models/best.pt \
       --out labels_cache.h5 --debug_dir ../debug_samples --device cuda
 
-  # 여러 bag 일괄 → 폴더 안 각 bag 을 <out_dir>/<bag폴더명>.h5 로 (모델 1회 로드)
+  # 여러 bag 일괄 → 폴더 안 각 bag 을 <out_dir>/<세션명>.h5 로 (모델 1회 로드)
   python extract_labels.py --bag_root /path/to/bags_parent \
       --segformer_ckpt ../models/segformer_lane \
       --out_dir ~/labels_all --device cuda
@@ -265,6 +265,15 @@ def waypoint_gt(cmds: list[CmdSample], cmd_ts: list[int], t0_ns: int) -> np.ndar
     Uses the LAST cmd_vel command active in each integration sub-step (ZOH).
     Returns (WP_N,2) float32 in robot frame (x forward, y left) — or None if there
     aren't enough future cmd_vel samples to cover the horizon.
+
+    이 로버의 cmd_vel 부호 관례(teleop_node / motor_bridge_node 확인):
+      linear.x  < 0  = 전진  (음수가 forward)
+      angular.z > 0  = 우회전 (d 키, motor_bridge mix: turn>0 → 우)
+    표준 로봇 프레임은 x=forward(+), y=left(+), th=CCW(+) 이므로 적분 시
+    부호를 정규화한다:  v_fwd = -linear.x,  yaw_rate = -angular.z.
+    이렇게 해야 전진이 +x(화면 위), 좌회전이 +y(좌)로 docstring과 일치하고
+    viz.draw_intent 의 좌표 변환(+x→위, +y→좌)과도 맞는다. (정규화 전에는
+    전진이 -x 라 시각화에서 waypoint 가 화면 아래로 깔려 잘려 보였다.)
     """
     horizon_ns = int(WP_HORIZON_S * 1e9)
     end_ns = t0_ns + horizon_ns
@@ -284,10 +293,13 @@ def waypoint_gt(cmds: list[CmdSample], cmd_ts: list[int], t0_ns: int) -> np.ndar
         if i < 0:
             i = 0
         c = cmds[i]
+        # 부호 정규화: 전진(linear.x<0)→+x, 좌회전→+y, CCW→+yaw
+        v_fwd = -c.v
+        yaw_rate = -c.w
         # forward euler
-        th += c.w * sub_dt
-        x += c.v * math.cos(th) * sub_dt
-        y += c.v * math.sin(th) * sub_dt
+        th += yaw_rate * sub_dt
+        x += v_fwd * math.cos(th) * sub_dt
+        y += v_fwd * math.sin(th) * sub_dt
         if (k + 1) in sample_marks:
             samples.append((x, y))
     if len(samples) != WP_N:
@@ -494,13 +506,39 @@ def find_bags(root: Path):
     return sorted(p.parent for p in root.rglob("metadata.yaml"))
 
 
+def output_stem_for_bag(root: Path, bag: Path) -> str:
+    """Return a stable, collision-resistant H5 stem for a bag under root.
+
+    record.launch stores sessions as <root>/<session>/bag/metadata.yaml. Using
+    bag.name directly would make every output labels_all/bag.h5, so for that
+    common layout we name the H5 after the session directory instead.
+    """
+    try:
+        rel = bag.relative_to(root)
+    except ValueError:
+        rel = bag
+
+    parts = rel.parts
+    if not parts or parts == (".",):
+        parts = (bag.name,)
+    elif parts[-1] == "bag" and len(parts) > 1:
+        parts = parts[:-1]
+
+    # Preserve useful names while making nested paths safe as one filename.
+    safe_parts = []
+    for part in parts:
+        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in part)
+        safe_parts.append(safe or "bag")
+    return "__".join(safe_parts)
+
+
 def main():
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--bag", type=Path, help="단일 rosbag2 디렉터리")
     src.add_argument("--bag_root", type=Path,
                      help="여러 bag 이 든 폴더(재귀로 metadata.yaml 찾아 일괄 추출). "
-                          "각 bag → <out_dir>/<bag폴더명>.h5")
+                          "각 bag → <out_dir>/<세션명>.h5")
     ap.add_argument("--segformer_ckpt", type=Path, default=None,
                     help="fine-tuned SegFormer lane checkpoint dir (required)")
     ap.add_argument("--yolo_weights", type=Path,
@@ -534,7 +572,7 @@ def main():
                     debug_dir=args.debug_dir, limit=args.limit)
         return
 
-    # --bag_root: 폴더 안 모든 bag 을 순회, 각각 <out_dir>/<bag폴더명>.h5 로.
+    # --bag_root: 폴더 안 모든 bag 을 순회, 각각 <out_dir>/<세션명>.h5 로.
     bags = find_bags(args.bag_root)
     if not bags:
         raise SystemExit(f"no rosbag2 (metadata.yaml) found under {args.bag_root}")
@@ -542,10 +580,31 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"found {len(bags)} bag(s) under {args.bag_root} -> {out_dir}")
 
+    out_paths = [out_dir / f"{output_stem_for_bag(args.bag_root, bag)}.h5" for bag in bags]
+    seen = {}
+    dupes = []
+    for bag, out_h5 in zip(bags, out_paths):
+        if out_h5 in seen:
+            dupes.append((seen[out_h5], bag, out_h5))
+        else:
+            seen[out_h5] = bag
+    if dupes:
+        lines = ["output h5 name collision detected; refusing to overwrite:"]
+        for first, second, out_h5 in dupes:
+            lines.append(f"  {first} and {second} -> {out_h5}")
+        raise SystemExit("\n".join(lines))
+    existing = [p for p in out_paths if p.exists()]
+    if existing:
+        lines = [
+            "output h5 already exists; refusing to overwrite. "
+            "Remove the output dir first or choose a fresh --out_dir:"
+        ]
+        lines.extend(f"  {p}" for p in existing)
+        raise SystemExit("\n".join(lines))
+
     total = 0
-    for k, bag in enumerate(bags, 1):
-        out_h5 = out_dir / f"{bag.name}.h5"
-        print(f"\n[{k}/{len(bags)}] {bag.name}")
+    for k, (bag, out_h5) in enumerate(zip(bags, out_paths), 1):
+        print(f"\n[{k}/{len(bags)}] {bag}")
         total += process_bag(bag, out_h5, segmenter, det,
                              debug_dir=args.debug_dir, limit=args.limit)
     print(f"\nall done. {len(bags)} bag(s), total kept={total} -> {out_dir}")
