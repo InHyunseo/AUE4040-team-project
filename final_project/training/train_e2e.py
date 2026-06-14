@@ -112,7 +112,14 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-3)
     ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--patience", type=int, default=5, help="early-stop epochs")
+    ap.add_argument("--patience", type=int, default=10, help="early-stop epochs")
+    # ReduceLROnPlateau: val_steer 가 --lr_patience epoch 정체하면 LR×lr_factor.
+    # cosine(T_max) 은 early-stop 길이를 미리 못 맞춰 LR 이 거의 안 식는 문제가 있어
+    # plateau 로 교체(정체 시 자동 감쇠). early-stop patience > lr_patience 라야
+    # LR 을 낮춘 뒤 더 내려가는지 볼 여유가 생긴다.
+    ap.add_argument("--lr_patience", type=int, default=3, help="LR decay patience (epochs)")
+    ap.add_argument("--lr_factor", type=float, default=0.5, help="LR decay factor on plateau")
+    ap.add_argument("--min_lr", type=float, default=1e-6, help="LR floor")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     ap.add_argument("--viz_dir", type=Path, default=None,
@@ -179,7 +186,11 @@ def main():
           f"waypoint={args.waypoint_weight} | steer_smooth=±{args.steer_smooth}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # val_steer(=best 기준 신호) 가 정체하면 LR 을 깎는다. 빠른 초기 하강 후
+    # 정체되는 이 문제 패턴에 cosine 보다 적합.
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=args.lr_factor,
+        patience=args.lr_patience, min_lr=args.min_lr)
 
     # 이어학습: 가중치 + optimizer state 복원 (없으면 ImageNet pretrained 부터).
     best_val = float("inf")
@@ -188,7 +199,7 @@ def main():
         model.load_state_dict(ck["model"] if "model" in ck else ck)
         if isinstance(ck, dict) and "optimizer" in ck:
             optimizer.load_state_dict(ck["optimizer"])
-        # scheduler state 복원 (없으면 cosine 이 epoch0 부터 재시작해 LR 틀어짐).
+        # scheduler state 복원 (plateau 의 정체 카운터/현재 LR 이어가기).
         if isinstance(ck, dict) and "scheduler" in ck:
             scheduler.load_state_dict(ck["scheduler"])
         # best 기준은 val steer (실제 구동 신호). 옛 체크포인트는 val_steer 키가 있음.
@@ -205,7 +216,7 @@ def main():
         t0 = time.time()
         tr = run_epoch(model, train_loader, criterion, device, optimizer)
         va = run_epoch(model, val_loader, criterion, device, optimizer=None)
-        scheduler.step()
+        scheduler.step(va["steer"])   # plateau: best 기준과 동일 신호로 감쇠
         dt = time.time() - t0
         lr_now = optimizer.param_groups[0]["lr"]
         print(f"ep {epoch:3d}/{args.epochs}  "
