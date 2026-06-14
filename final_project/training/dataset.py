@@ -112,13 +112,19 @@ class E2EDataset(Dataset):
     h5py.File 은 워커별로 lazy open (멀티프로세싱 안전)."""
 
     def __init__(self, h5_paths, indices=None, augment=False, seed=0,
-                 steer_smooth=0):
+                 steer_smooth=0, wp_fix_sign=False):
         if isinstance(h5_paths, (str, Path)):
             h5_paths = [h5_paths]
         self.h5_paths = [str(p) for p in h5_paths]
         self.augment = augment
         self.seed = seed
         self.steer_smooth = int(steer_smooth)
+        # wp_fix_sign: 부호 버그 시절 추출된 옛 H5 의 waypoint 를 즉석 보정.
+        # extract_labels 부호 수정(v_fwd=-c.v, yaw_rate=-c.w)의 순효과는
+        # (x,y) → (-x, +y) 다 (cos 짝함수 → x 만 반전, sin 은 heading 반전과
+        # -v 가 상쇄돼 y 불변). 단순 -wp 가 아니라 x 만 뒤집어야 맞는다.
+        # 재추출한 새 부호 H5 에는 False 로 둔다(이중 반전 방지).
+        self.wp_fix_sign = bool(wp_fix_sign)
         self._files = None  # 워커별 lazy
 
         # 각 파일 길이로 누적 오프셋 구성
@@ -173,6 +179,9 @@ class E2EDataset(Dataset):
             steer = float(f["steer"][li])
         thr   = float(f["throttle"][li])
         wp    = f["waypoint"][li].astype(np.float32)  # (5,2)
+        if self.wp_fix_sign:
+            wp = wp.copy()
+            wp[:, 0] *= -1.0   # 옛 부호 보정: x(전방)만 반전, y(좌우)는 그대로
 
         lane_c  = composite_lane(lane, seg)
         front_c = composite_front(front, det)

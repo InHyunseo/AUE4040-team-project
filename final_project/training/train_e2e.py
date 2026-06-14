@@ -130,6 +130,10 @@ def main():
     # 순간 떨림 완화). 0=끔. 세션 경계는 넘지 않는다(dataset 이 보장).
     ap.add_argument("--steer_smooth", type=int, default=0,
                     help="moving-average half-window over steer GT (0=off)")
+    # 옛 부호 H5 의 waypoint 를 즉석 보정(x 만 반전). 재추출 없이 wp 부호 버그를
+    # 학습/시각화에서 고친다. 새 부호로 재추출한 H5 엔 끈다(이중 반전 방지).
+    ap.add_argument("--wp_fix_sign", action="store_true",
+                    help="flip waypoint x for legacy (pre-sign-fix) H5")
     args = ap.parse_args()
 
     device = args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu"
@@ -144,9 +148,11 @@ def main():
         raise SystemExit("no training samples — check --cache path / extraction")
 
     train_ds = E2EDataset(cache_paths, indices=train_idx, augment=True,
-                          seed=args.seed, steer_smooth=args.steer_smooth)
+                          seed=args.seed, steer_smooth=args.steer_smooth,
+                          wp_fix_sign=args.wp_fix_sign)
     val_ds   = E2EDataset(cache_paths, indices=val_idx, augment=False,
-                          seed=args.seed, steer_smooth=args.steer_smooth)
+                          seed=args.seed, steer_smooth=args.steer_smooth,
+                          wp_fix_sign=args.wp_fix_sign)
 
     pin = device == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
