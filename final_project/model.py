@@ -50,7 +50,7 @@ class LaneEncoder(nn.Module):
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),  # closed-world 과적합 방지
+            nn.Dropout(0.5),  # closed-world 과적합 방지
         )
 
     def forward(self, x):
@@ -81,7 +81,7 @@ class FrontEncoder(nn.Module):
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
         )
 
     def forward(self, x):
@@ -114,13 +114,13 @@ class ControlHead(nn.Module):
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
 
             # 512 → 256
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
 
             # 256 → 64
             nn.Linear(256, 64),
@@ -158,12 +158,12 @@ class WaypointHead(nn.Module):
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
 
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
 
             nn.Linear(256, 64),
             nn.BatchNorm1d(64),

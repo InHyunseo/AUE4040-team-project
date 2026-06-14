@@ -109,10 +109,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
+    ap.add_argument("--weight_decay", type=float, default=1e-3)
     ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--patience", type=int, default=10, help="early-stop epochs")
+    ap.add_argument("--patience", type=int, default=5, help="early-stop epochs")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     ap.add_argument("--viz_dir", type=Path, default=None,
