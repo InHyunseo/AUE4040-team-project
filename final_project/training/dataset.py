@@ -103,16 +103,22 @@ class E2EDataset(Dataset):
       indices    : 사용할 전역 인덱스 부분집합 (train/val split 용). None=전체.
       augment    : True 면 합성된 입력에 색상 jitter (val 은 False).
       seed       : jitter 재현용.
+      steer_smooth : >0 이면 steer GT 를 H5(세션) 내부에서 ±k 프레임 이동평균.
+                     teleop raw 조향의 순간 떨림(같은 장면 다른 라벨)을 완화한다.
+                     H5 행은 시간순(extract_labels 가 정렬 저장)이라 행 이동평균이
+                     곧 시간 스무딩이고, 세션 경계는 절대 넘지 않는다(파일별 계산).
 
     여러 H5 는 길이를 이어붙여 하나의 평탄한 인덱스 공간으로 노출한다.
     h5py.File 은 워커별로 lazy open (멀티프로세싱 안전)."""
 
-    def __init__(self, h5_paths, indices=None, augment=False, seed=0):
+    def __init__(self, h5_paths, indices=None, augment=False, seed=0,
+                 steer_smooth=0):
         if isinstance(h5_paths, (str, Path)):
             h5_paths = [h5_paths]
         self.h5_paths = [str(p) for p in h5_paths]
         self.augment = augment
         self.seed = seed
+        self.steer_smooth = int(steer_smooth)
         self._files = None  # 워커별 lazy
 
         # 각 파일 길이로 누적 오프셋 구성
@@ -124,6 +130,20 @@ class E2EDataset(Dataset):
         total = int(self._cumsum[-1])
 
         self.indices = list(range(total)) if indices is None else list(indices)
+
+        # steer 스무딩 룩업: 파일별로 전체 steer 를 읽어 ±k 이동평균(경계 클램프).
+        # 미리 계산해 두면 __getitem__ 이 O(1) 로 조회한다.
+        self._steer_lut = None
+        if self.steer_smooth > 0:
+            self._steer_lut = []
+            k = self.steer_smooth
+            for p in self.h5_paths:
+                with h5py.File(p, "r") as f:
+                    s = f["steer"][:].astype(np.float32)
+                # 경계를 복제(edge)해 패딩하면 세션 밖 값이 안 섞인다.
+                pad = np.pad(s, k, mode="edge")
+                kernel = np.ones(2 * k + 1, dtype=np.float32) / (2 * k + 1)
+                self._steer_lut.append(np.convolve(pad, kernel, mode="valid"))
 
     def __len__(self):
         return len(self.indices)
@@ -147,7 +167,10 @@ class E2EDataset(Dataset):
         front = f["front"][li]
         seg   = f["seg"][li]       # (3,224,224) {0,255}
         det   = f["det"][li]       # (5,)
-        steer = float(f["steer"][li])
+        if self._steer_lut is not None:
+            steer = float(self._steer_lut[fi][li])   # 세션 내부 ±k 이동평균
+        else:
+            steer = float(f["steer"][li])
         thr   = float(f["throttle"][li])
         wp    = f["waypoint"][li].astype(np.float32)  # (5,2)
 

@@ -121,6 +121,15 @@ def main():
                     help="save viz every N epochs (and on each new best)")
     ap.add_argument("--resume", type=Path, default=None,
                     help="resume from checkpoint (model + optimizer state)")
+    # loss 가중치 (E2ELoss 기본 1.0/0.5/0.5). waypoint 부호 오염 격리 테스트엔
+    # --waypoint_weight 0 으로 보조 task 를 꺼서 steer 학습에 미치는 영향을 본다.
+    ap.add_argument("--steer_weight", type=float, default=1.0)
+    ap.add_argument("--throttle_weight", type=float, default=0.5)
+    ap.add_argument("--waypoint_weight", type=float, default=0.5)
+    # steer GT 시간 스무딩: H5(세션) 내부에서 ±k 프레임 이동평균(teleop raw 조향의
+    # 순간 떨림 완화). 0=끔. 세션 경계는 넘지 않는다(dataset 이 보장).
+    ap.add_argument("--steer_smooth", type=int, default=0,
+                    help="moving-average half-window over steer GT (0=off)")
     args = ap.parse_args()
 
     device = args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu"
@@ -134,8 +143,10 @@ def main():
     if len(train_idx) == 0:
         raise SystemExit("no training samples — check --cache path / extraction")
 
-    train_ds = E2EDataset(cache_paths, indices=train_idx, augment=True, seed=args.seed)
-    val_ds   = E2EDataset(cache_paths, indices=val_idx, augment=False, seed=args.seed)
+    train_ds = E2EDataset(cache_paths, indices=train_idx, augment=True,
+                          seed=args.seed, steer_smooth=args.steer_smooth)
+    val_ds   = E2EDataset(cache_paths, indices=val_idx, augment=False,
+                          seed=args.seed, steer_smooth=args.steer_smooth)
 
     pin = device == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
@@ -144,7 +155,11 @@ def main():
                             num_workers=args.workers, pin_memory=pin)
 
     model = E2ENet().to(device)
-    criterion = E2ELoss()
+    criterion = E2ELoss(steer_weight=args.steer_weight,
+                        throttle_weight=args.throttle_weight,
+                        waypoint_weight=args.waypoint_weight)
+    print(f"loss weights: steer={args.steer_weight} throttle={args.throttle_weight} "
+          f"waypoint={args.waypoint_weight} | steer_smooth=±{args.steer_smooth}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
