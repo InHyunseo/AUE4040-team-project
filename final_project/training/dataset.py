@@ -175,16 +175,51 @@ class E2EDataset(Dataset):
 
 
 def make_splits(h5_paths, val_frac=0.15, seed=0):
-    """전역 인덱스를 train/val 로 무작위 분할. 같은 seed 면 재현."""
+    """H5(세션) 단위로 train/val 분할. 같은 seed 면 재현.
+
+    프레임 단위 무작위 분할은 연속 주행(15fps)의 인접 프레임이 거의 동일해
+    train↔val 사이에 data leakage 가 생긴다(val 이 train 의 '쌍둥이'를 봐서
+    val loss 가 일반화를 과대평가). 그래서 **H5 한 개를 통째로** train 또는 val
+    에 배정한다 — val 로 빠진 세션의 프레임은 train 에 절대 안 섞인다.
+
+    크기가 제각각인 H5 들을 무작위 순서로 보며, 누적 val 샘플이 val_frac 비율을
+    넘기 직전까지 val 로 배정한다(비율을 대략 맞춤). h5_paths 가 1개뿐이면
+    세션 분리가 불가능하므로 그 안에서 시간 블록(앞=train, 뒤=val)으로 나눈다."""
     if isinstance(h5_paths, (str, Path)):
         h5_paths = [h5_paths]
-    total = 0
+
+    lengths = []
     for p in h5_paths:
         with h5py.File(str(p), "r") as f:
-            total += f["lane"].shape[0]
+            lengths.append(f["lane"].shape[0])
+    cumsum = np.cumsum([0] + lengths)
+    total = int(cumsum[-1])
+    n_val_target = int(total * val_frac)
+
+    # H5 가 1개뿐: 세션 분리 불가 → 시간 블록 split (뒤쪽 val_frac 을 val 로).
+    if len(h5_paths) == 1:
+        n_val = n_val_target
+        train_idx = list(range(0, total - n_val))
+        val_idx = list(range(total - n_val, total))
+        return train_idx, val_idx
+
+    # H5 단위 배정: 무작위 순서로 보되 작은 H5부터 채워 val 비율을 안정화한다
+    # (큰 H5 하나가 통째로 들어가 목표를 크게 초과하는 것을 줄임). 같은 seed 면
+    # 무작위성은 동률 H5 간 순서에만 작용해 재현된다.
     rng = np.random.default_rng(seed)
-    perm = rng.permutation(total)
-    n_val = int(total * val_frac)
-    val_idx = perm[:n_val].tolist()
-    train_idx = perm[n_val:].tolist()
+    order = sorted(range(len(h5_paths)),
+                   key=lambda fi: (lengths[fi], rng.random()))
+    val_files, n_val = set(), 0
+    for fi in order:
+        # 아직 val 이 비었거나, 이 파일을 넣어도 목표를 안 넘으면 val 로.
+        if n_val == 0 or (n_val + lengths[fi] <= n_val_target):
+            val_files.add(int(fi))
+            n_val += lengths[fi]
+        if n_val >= n_val_target:
+            break
+
+    train_idx, val_idx = [], []
+    for fi in range(len(h5_paths)):
+        rng_idx = range(int(cumsum[fi]), int(cumsum[fi + 1]))
+        (val_idx if fi in val_files else train_idx).extend(rng_idx)
     return train_idx, val_idx
