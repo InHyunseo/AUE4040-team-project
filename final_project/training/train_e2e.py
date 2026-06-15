@@ -37,7 +37,7 @@ sys.path.insert(0, str(_HERE.parent))   # final_project/ → model.py
 sys.path.insert(0, str(_HERE))          # training/      → dataset.py
 from model import E2ENet, E2ELoss  # noqa: E402
 
-from dataset import (E2EDataset, make_splits,  # noqa: E402
+from dataset import (E2EDataset, make_splits, oversample_avoidance,  # noqa: E402
                      IMAGENET_MEAN, IMAGENET_STD)
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -144,6 +144,10 @@ def main():
     # 좌우 flip aug (train 만). 이미지+seg채널교환+det+steer+wp 일관 반전, 50% 확률.
     # 데이터 2배 + 좌우 균형으로 steer 과적합을 완화한다.
     ap.add_argument("--hflip", action="store_true", help="50% horizontal flip aug (train)")
+    # 회피 oversampling: 차 감지+측면이동 큰 train 프레임을 N배 복제(클래스 불균형
+    # 완화). 재수집 없이 회피 학습 강화. val 엔 적용 안 함(원본 분포 평가).
+    ap.add_argument("--avoid_oversample", type=int, default=1,
+                    help="duplicate avoidance (det>0 + lateral wp) train frames N times")
     args = ap.parse_args()
 
     device = args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu"
@@ -153,6 +157,10 @@ def main():
 
     cache_paths = [str(p) for p in args.cache]
     train_idx, val_idx = make_splits(cache_paths, val_frac=args.val_frac, seed=args.seed)
+    if args.avoid_oversample > 1:
+        before = len(train_idx)
+        train_idx = oversample_avoidance(cache_paths, train_idx, factor=args.avoid_oversample)
+        print(f"avoid oversample x{args.avoid_oversample}: train {before} -> {len(train_idx)}")
     print(f"samples: train={len(train_idx)}  val={len(val_idx)}  (caches={len(cache_paths)})")
     if len(train_idx) == 0:
         raise SystemExit("no training samples — check --cache path / extraction")

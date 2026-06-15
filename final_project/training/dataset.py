@@ -310,3 +310,36 @@ def make_splits(h5_paths, val_frac=0.15, seed=0):
         rng_idx = range(int(cumsum[fi]), int(cumsum[fi + 1]))
         (val_idx if fi in val_files else train_idx).extend(rng_idx)
     return train_idx, val_idx
+
+
+def oversample_avoidance(h5_paths, indices, factor=3, lat_thresh=0.15):
+    """train 인덱스에서 '회피' 프레임(차 감지 det>0 + waypoint 측면이동 큰)을 factor
+    배로 복제해 비중을 키운다. 재수집 없이 클래스 불균형(회피가 ~18%)을 완화 —
+    모델이 다수인 차선주행에 맞춰 회피를 약하게(평균쳐서) 학습하는 걸 막는다.
+
+    val 인덱스에는 쓰지 말 것(평가는 원본 분포). factor=1 이면 무변경.
+    회피 판정은 det[4]>0(차 있음) AND |waypoint 끝점 y|>lat_thresh(실제 비킴).
+    wp_fix_sign 과 무관하게 |y| 만 보므로 옛/새 H5 모두 동작."""
+    if factor <= 1:
+        return list(indices)
+    if isinstance(h5_paths, (str, Path)):
+        h5_paths = [h5_paths]
+    h5_paths = [str(p) for p in h5_paths]
+
+    # 파일별 누적 오프셋 + det/waypoint 통째로 읽어 회피 마스크 구성
+    lengths, dets, wp_lat = [], [], []
+    for p in h5_paths:
+        with h5py.File(p, "r") as f:
+            lengths.append(f["lane"].shape[0])
+            dets.append(f["det"][:, 4])              # conf
+            wp_lat.append(np.abs(f["waypoint"][:, -1, 1]))   # |끝점 y|
+    cumsum = np.cumsum([0] + lengths)
+    det_all = np.concatenate(dets)
+    lat_all = np.concatenate(wp_lat)
+    is_avoid = (det_all > 0) & (lat_all > lat_thresh)   # 전역 인덱스 기준
+
+    out = list(indices)
+    extra = [g for g in indices if is_avoid[g]]
+    for _ in range(factor - 1):
+        out.extend(extra)
+    return out
