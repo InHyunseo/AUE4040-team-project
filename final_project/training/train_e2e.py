@@ -127,7 +127,12 @@ def main():
     ap.add_argument("--viz_every", type=int, default=5,
                     help="save viz every N epochs (and on each new best)")
     ap.add_argument("--resume", type=Path, default=None,
-                    help="resume from checkpoint (model + optimizer state)")
+                    help="resume from checkpoint (model + optimizer/scheduler state 이어가기)")
+    # 미세조정: --resume 의 체크포인트에서 **가중치만** 불러오고 optimizer/scheduler/
+    # best 는 새로 시작한다. 새 --lr(낮게)로 깨끗이 시작하고 best 도 새 데이터 기준으로
+    # 다시 잡아 조기종료를 막는다. (--resume 의 "정확히 이어가기"와 구분.)
+    ap.add_argument("--finetune", action="store_true",
+                    help="load only model weights from --resume; fresh optimizer/scheduler/best")
     # loss 가중치 (E2ELoss 기본 1.0/0.5/0.5). waypoint 부호 오염 격리 테스트엔
     # --waypoint_weight 0 으로 보조 task 를 꺼서 steer 학습에 미치는 영향을 본다.
     ap.add_argument("--steer_weight", type=float, default=1.0)
@@ -205,15 +210,21 @@ def main():
     if args.resume is not None:
         ck = torch.load(str(args.resume), map_location=device)
         model.load_state_dict(ck["model"] if "model" in ck else ck)
-        if isinstance(ck, dict) and "optimizer" in ck:
-            optimizer.load_state_dict(ck["optimizer"])
-        # scheduler state 복원 (plateau 의 정체 카운터/현재 LR 이어가기).
-        if isinstance(ck, dict) and "scheduler" in ck:
-            scheduler.load_state_dict(ck["scheduler"])
-        # best 기준은 val steer (실제 구동 신호). 옛 체크포인트는 val_steer 키가 있음.
-        if isinstance(ck, dict) and "val_steer" in ck:
-            best_val = float(ck["val_steer"])
-        print(f"resumed from {args.resume} (epoch={ck.get('epoch')} best_steer={best_val:.4f})")
+        if args.finetune:
+            # 미세조정: 가중치만. optimizer/scheduler/best 는 새 --lr 로 깨끗이 시작.
+            print(f"finetune from {args.resume} (weights only; fresh optimizer/scheduler, "
+                  f"lr={args.lr})")
+        else:
+            # 정확히 이어가기: optimizer/scheduler/best 복원.
+            if isinstance(ck, dict) and "optimizer" in ck:
+                optimizer.load_state_dict(ck["optimizer"])
+            # scheduler state 복원 (plateau 의 정체 카운터/현재 LR 이어가기).
+            if isinstance(ck, dict) and "scheduler" in ck:
+                scheduler.load_state_dict(ck["scheduler"])
+            # best 기준은 val steer (실제 구동 신호). 옛 체크포인트는 val_steer 키가 있음.
+            if isinstance(ck, dict) and "val_steer" in ck:
+                best_val = float(ck["val_steer"])
+            print(f"resumed from {args.resume} (epoch={ck.get('epoch')} best_steer={best_val:.4f})")
 
     args_meta = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
     args_meta["cache"] = cache_paths
