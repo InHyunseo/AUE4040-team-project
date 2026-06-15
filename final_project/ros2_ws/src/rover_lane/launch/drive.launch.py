@@ -35,6 +35,12 @@ def generate_launch_description() -> LaunchDescription:
     watchdog_hz = LaunchConfiguration("watchdog_hz")
     cmd_timeout_s = LaunchConfiguration("cmd_timeout_s")
     smooth_alpha = LaunchConfiguration("smooth_alpha")
+    steer_source = LaunchConfiguration("steer_source")
+    steer_mode = LaunchConfiguration("steer_mode")
+    lookahead_idx = LaunchConfiguration("lookahead_idx")
+    idx_lo = LaunchConfiguration("idx_lo")
+    idx_hi = LaunchConfiguration("idx_hi")
+    pursuit_gain = LaunchConfiguration("pursuit_gain")
 
     return LaunchDescription([
         DeclareLaunchArgument("fps", default_value="15"),
@@ -64,6 +70,20 @@ def generate_launch_description() -> LaunchDescription:
                               description="steer low-pass per watchdog tick "
                                           "(matches teleop SMOOTH_ALPHA; 0=off, "
                                           "lower=smoother/laggier, higher=snappier)"),
+        # 조향 소스/모드 (회피 비교용). head=ControlHead steer 직접,
+        # waypoint=waypoint 추종(steer_mode: pursuit|heading|max_y|mean).
+        DeclareLaunchArgument("steer_source", default_value="waypoint",
+                              description="head | waypoint"),
+        DeclareLaunchArgument("steer_mode", default_value="pursuit",
+                              description="pursuit | heading | max_y | mean (waypoint 일 때)"),
+        DeclareLaunchArgument("lookahead_idx", default_value="3",
+                              description="pursuit/heading 단일 점 인덱스(0~4)"),
+        DeclareLaunchArgument("idx_lo", default_value="2",
+                              description="max_y/mean 구간 시작 인덱스"),
+        DeclareLaunchArgument("idx_hi", default_value="4",
+                              description="max_y/mean 구간 끝 인덱스"),
+        DeclareLaunchArgument("pursuit_gain", default_value="0.25",
+                              description="곡률/각도→정규화 조향 게인 (heading류는 0.6~0.8 부터)"),
 
         # Camera (same as record.launch).
         Node(package="rover_camera", executable="camera_node",
@@ -104,5 +124,11 @@ def generate_launch_description() -> LaunchDescription:
                  "watchdog_hz": watchdog_hz,
                  "cmd_timeout_s": cmd_timeout_s,
                  "smooth_alpha": smooth_alpha,
+                 "steer_source": steer_source,
+                 "steer_mode": steer_mode,
+                 "lookahead_idx": lookahead_idx,
+                 "idx_lo": idx_lo,
+                 "idx_hi": idx_hi,
+                 "pursuit_gain": pursuit_gain,
              }]),
     ])

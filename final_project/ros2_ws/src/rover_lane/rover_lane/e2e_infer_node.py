@@ -253,9 +253,14 @@ class E2EInferNode(Node):
         # steer 라벨은 teleop raw 라 프레임마다 튀어(weaving) 학습이 노이즈를 물려받지만,
         # waypoint 는 cmd_vel 적분 궤적이라 부드럽다. lookahead 점의 곡률로 조향을 유도하면
         # 더 안정적. lookahead_idx 점(로봇 프레임)에서 κ=2y/L², angular≈κ·gain.
-        self.declare_parameter("steer_source", "pursuit")   # "head" | "pursuit"
-        self.declare_parameter("lookahead_idx", 3)          # wp 인덱스(0~4). 끝쪽이 부드러움
-        self.declare_parameter("pursuit_gain", 0.25)        # 곡률→정규화 조향(실측 GT스케일≈0.24)
+        self.declare_parameter("steer_source", "pursuit")   # "head" | "waypoint"
+        # waypoint 조향 모드(회피 비교용): pursuit | heading | max_y | mean.
+        # 회피가 약하면 거리정규화(pursuit) 대신 heading/max_y 로 바꿔본다.
+        self.declare_parameter("steer_mode", "pursuit")
+        self.declare_parameter("lookahead_idx", 3)          # pursuit/heading 용 단일 점(0~4)
+        self.declare_parameter("idx_lo", 2)                 # max_y/mean 용 구간 시작
+        self.declare_parameter("idx_hi", 4)                 # max_y/mean 용 구간 끝
+        self.declare_parameter("pursuit_gain", 0.25)        # 곡률/각도→정규화 조향(모드별 튜닝)
 
         self.lane_topic = self.get_parameter("lane_topic").value
         self.front_topic = self.get_parameter("front_topic").value
@@ -272,12 +277,25 @@ class E2EInferNode(Node):
         self.smooth_alpha = min(1.0, max(0.0, float(self.get_parameter("smooth_alpha").value)))
         watchdog_hz = max(1e-3, float(self.get_parameter("watchdog_hz").value))
         self.steer_source = str(self.get_parameter("steer_source").value).lower()
+        self.steer_mode = str(self.get_parameter("steer_mode").value).lower()
         self.lookahead_idx = int(self.get_parameter("lookahead_idx").value)
+        self.idx_lo = int(self.get_parameter("idx_lo").value)
+        self.idx_hi = int(self.get_parameter("idx_hi").value)
         self.pursuit_gain = float(self.get_parameter("pursuit_gain").value)
-        if self.steer_source not in ("head", "pursuit"):
+        # "pursuit" 는 옛 steer_source 값 — waypoint 로 정규화(하위호환).
+        if self.steer_source == "pursuit":
+            self.steer_source, self.steer_mode = "waypoint", "pursuit"
+        if self.steer_source not in ("head", "waypoint"):
             self.get_logger().warn(
                 f"unknown steer_source={self.steer_source!r}, using 'head'")
             self.steer_source = "head"
+        if self.steer_mode not in ("pursuit", "heading", "max_y", "mean"):
+            self.get_logger().warn(
+                f"unknown steer_mode={self.steer_mode!r}, using 'pursuit'")
+            self.steer_mode = "pursuit"
+        self.get_logger().info(
+            f"steer_source={self.steer_source} mode={self.steer_mode} "
+            f"idx={self.lookahead_idx} lo/hi={self.idx_lo}/{self.idx_hi} gain={self.pursuit_gain}")
 
         self.pub_cmd = self.create_publisher(Twist, self.cmd_topic, 10)
 
@@ -385,10 +403,12 @@ class E2EInferNode(Node):
                                     throttle_duration_sec=1.0)
             return
 
-        # 조향 소스 선택: pursuit 이면 raw steer 헤드 대신 waypoint pure pursuit 로
-        # 조향 의도를 산출(부드러운 waypoint → weaving 완화). throttle 은 그대로.
-        if self.steer_source == "pursuit":
-            steer = self.pursuit_steer(wp, self.lookahead_idx, self.pursuit_gain)
+        # 조향 소스 선택: waypoint 면 raw steer 헤드 대신 waypoint 추종(steer_mode)
+        # 으로 조향 의도 산출(부드러운 waypoint → weaving 완화). throttle 은 그대로.
+        if self.steer_source == "waypoint":
+            steer = self.waypoint_steer(
+                wp, self.steer_mode, self.lookahead_idx, self.pursuit_gain,
+                self.idx_lo, self.idx_hi)
 
         # Store as the latest TARGET. The watchdog (20 Hz, like teleop) eases the
         # actually-published command toward it — we do NOT publish raw here, so
@@ -457,27 +477,63 @@ class E2EInferNode(Node):
         raise RuntimeError(f"cannot locate steer/throttle in engine outputs: {list(out)}")
 
     @staticmethod
-    def pursuit_steer(wp: np.ndarray, lookahead_idx: int, gain: float) -> float:
-        """waypoint(로봇 프레임, x=전방 y=좌) → 정규화 조향 의도 [-1,1] (pure pursuit).
+    def waypoint_steer(wp: np.ndarray, mode: str, lookahead_idx: int, gain: float,
+                       idx_lo: int = 2, idx_hi: int = 4) -> float:
+        """waypoint(로봇 프레임, x=전방 y=좌) → 정규화 조향 의도 [-1,1].
 
-        lookahead_idx 점 (gx,gy) 의 곡률 κ = 2·gy / L²  (L²=gx²+gy²).
-        조향 부호 규약: 이 로버는 angular.z(=steer) **양수가 우회전**(teleop d키/
-        motor_bridge). 우회전 목표는 wp.y<0(우)이므로 steer = -gain·κ 로 부호를
-        뒤집어야 GT steer 와 일치한다(실측 상관 r=+0.79, 반전 전엔 -0.79). 추론은
-        angular.z = steer*1.2 로 역변환하므로 head steer 와 같은 경로를 탄다.
-        L² 정규화라 waypoint 절대 스케일 부정확에 둔감. 끝점은 부정확하므로 맨 끝
-        (idx 4)보다 idx 3 권장. gain≈0.25 가 GT steer 스케일에 맞음(실측).
+        조향 부호 규약(모든 모드 공통): 이 로버는 angular.z(=steer) **양수가 우회전**
+        (teleop d키/motor_bridge). 우회전 목표는 wp.y<0(우)이므로 최종 steer 에
+        **마이너스**를 붙여야 GT 와 일치(실측 상관 r=+0.79, 안 붙이면 -0.79).
+        추론은 angular.z=steer*1.2 로 역변환(head steer 와 같은 경로).
+
+        mode 별 회피/주행 특성 — 회피가 약하면 거리정규화(L²)가 범인일 수 있어
+        여러 모드를 실차에서 비교한다:
+          "pursuit" : κ=2·gy/L² (lookahead_idx 점). 거리로 나눠 부드럽지만, 멀리서
+                      크게 비키는 회피는 L² 가 커져 곡률이 작아짐(회피 약화 위험).
+          "heading" : atan2(gy,gx) (lookahead_idx 점). 거리로 안 나눠 회피 의도가
+                      안 약해짐. 각도 기반이라 스케일에 둔감.
+          "max_y"   : wp[idx_lo:idx_hi+1] 중 |y| 최대 점의 heading. 회피 의도가 가장
+                      강한 점을 잡아 회피를 놓치지 않음.
+          "mean"    : wp[idx_lo:idx_hi+1] 평균 heading. 노이즈에 가장 강하고 부드러움.
+        gain≈0.25(pursuit) / heading·max_y·mean 은 각도라 gain≈0.6~0.8 부터 튜닝.
         wp 없거나 전방거리 0 이면 0.
         """
+        import math
         if wp is None or len(wp) == 0:
             return 0.0
-        i = max(0, min(int(lookahead_idx), len(wp) - 1))
-        gx, gy = float(wp[i, 0]), float(wp[i, 1])
-        L2 = gx * gx + gy * gy
-        if L2 < 1e-6 or gx <= 0.0:   # 전방(+x) 목표가 아니면 조향 안 함
+        n = len(wp)
+        lo = max(0, min(int(idx_lo), n - 1))
+        hi = max(lo, min(int(idx_hi), n - 1))
+        i = max(0, min(int(lookahead_idx), n - 1))
+
+        if mode == "pursuit":
+            gx, gy = float(wp[i, 0]), float(wp[i, 1])
+            L2 = gx * gx + gy * gy
+            if L2 < 1e-6 or gx <= 0.0:
+                return 0.0
+            raw = 2.0 * gy / L2
+        elif mode == "heading":
+            gx, gy = float(wp[i, 0]), float(wp[i, 1])
+            if gx <= 0.0:
+                return 0.0
+            raw = math.atan2(gy, gx)
+        elif mode == "max_y":
+            seg = wp[lo:hi + 1]
+            j = int(np.argmax(np.abs(seg[:, 1])))
+            gx, gy = float(seg[j, 0]), float(seg[j, 1])
+            if gx <= 0.0:
+                return 0.0
+            raw = math.atan2(gy, gx)
+        elif mode == "mean":
+            seg = wp[lo:hi + 1]
+            gx, gy = float(seg[:, 0].mean()), float(seg[:, 1].mean())
+            if gx <= 0.0:
+                return 0.0
+            raw = math.atan2(gy, gx)
+        else:
             return 0.0
-        kappa = 2.0 * gy / L2
-        return float(max(-1.0, min(1.0, -gain * kappa)))   # -: 우회전(+steer)=wp.y<0
+
+        return float(max(-1.0, min(1.0, -gain * raw)))   # -: 우회전(+steer)=wp.y<0
 
     def _set_target(self, steer: float, throttle: float) -> None:
         """Map model steer -> target Twist using the training control contract.
