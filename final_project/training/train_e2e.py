@@ -112,12 +112,12 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-3)
     ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--patience", type=int, default=10, help="early-stop epochs")
+    ap.add_argument("--patience", type=int, default=5, help="early-stop epochs")
     # ReduceLROnPlateau: val_steer 가 --lr_patience epoch 정체하면 LR×lr_factor.
     # cosine(T_max) 은 early-stop 길이를 미리 못 맞춰 LR 이 거의 안 식는 문제가 있어
     # plateau 로 교체(정체 시 자동 감쇠). early-stop patience > lr_patience 라야
-    # LR 을 낮춘 뒤 더 내려가는지 볼 여유가 생긴다.
-    ap.add_argument("--lr_patience", type=int, default=3, help="LR decay patience (epochs)")
+    # LR 을 낮춘 뒤 더 내려가는지 볼 여유가 생긴다(patience 5 면 lr_patience 2).
+    ap.add_argument("--lr_patience", type=int, default=2, help="LR decay patience (epochs)")
     ap.add_argument("--lr_factor", type=float, default=0.5, help="LR decay factor on plateau")
     ap.add_argument("--min_lr", type=float, default=1e-6, help="LR floor")
     ap.add_argument("--seed", type=int, default=0)
