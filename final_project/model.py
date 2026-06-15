@@ -91,64 +91,55 @@ class FrontEncoder(nn.Module):
         return feat
 
 
-class ControlHead(nn.Module):
+class SteerHead(nn.Module):
     """
-    concat feature → steer, throttle  (메인 출력)
+    waypoints → steer, throttle  (cascade 제어 출력)
 
-    입력: concat(lane_feat, front_feat) = 256 + 256 = 512
+    입력: WaypointHead가 낸 waypoints 평탄화 (B, WP_N*2 = 10)
+          ※ E2ENet.forward 에서 waypoints.detach() 로 넘긴다 — backbone/waypoint 는
+            waypoint loss 로만 학습돼 "정직한 미래 경로"로 유지되고, SteerHead 는 그
+            위를 읽는 깨끗한 downstream reader 가 된다("학습된 pure pursuit").
     출력: steer (B,), throttle (B,)  ∈ [-1, 1]
 
-    정규화: BatchNorm1d (FC 레이어 간 internal covariate shift 방지)
-    출력 활성화: Tanh
-    - steer/throttle 범위를 [-1, 1]로 강제
-    - rover_control에서 실제 값으로 역변환:
-        linear.x  = -(0.20 + abs(steer) * 0.05)  # -0.20 ~ -0.25
-        angular.z = steer * 1.2                   # -1.2 ~ +1.2
+    weaving 회피: 입력 waypoint 가 cmd_vel 적분이라 저주파(부드러움) → steer 출력도
+    부드럽다. 타깃은 시간 스무딩된 사람 steer(dataset steer_smooth)로 노이즈 제거.
+    5점 전체를 보므로 단일 lookahead pure pursuit 보다 회피 path 모양을 더 잘 읽는다.
 
-    학습: pretrained 없음, 처음부터 학습
+    역변환(추론): linear.x = -(0.20 + |steer|*0.05), angular.z = steer*1.2.
+    입력 차원이 작아(10) BatchNorm 대신 Dropout 만. 처음부터 학습.
     """
     def __init__(self):
         super().__init__()
         self.head = nn.Sequential(
-            # 512 → 512
-            nn.Linear(512, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(WP_N * 2, 64),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
 
-            # 512 → 256
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-
-            # 256 → 64
-            nn.Linear(256, 64),
-            nn.BatchNorm1d(64),
+            nn.Linear(64, 64),
             nn.ReLU(inplace=True),
 
-            # 64 → 2
+            # 64 → 2 (steer, throttle)
             nn.Linear(64, 2),
             nn.Tanh(),
         )
 
-    def forward(self, x):
-        return self.head(x)      # (B, 2)
+    def forward(self, wp_flat):
+        return self.head(wp_flat)    # (B, 2)
 
 
 class WaypointHead(nn.Module):
     """
     concat feature → waypoints (5점)  (보조 출력)
 
-    입력: concat(lane_feat, front_feat) = 512  (ControlHead와 동일 feature 공유)
+    입력: concat(lane_feat, front_feat) = 512
     출력: waypoints (B, 5, 2)  meters, 로봇 프레임 (x_forward, y_left)
 
-    ControlHead와 동일한 구조를 미러하되:
-    - 최종 레이어 Linear(64, WP_N*2=10) → (B, 5, 2)로 reshape
+    구조:
+    - 512 → 512 → 256 → 64 → Linear(64, WP_N*2=10) → (B, 5, 2)로 reshape
     - Tanh 없음 (waypoint는 미터 단위 unbounded 회귀값)
 
-    역할: steer/throttle과 같은 backbone feature를 멀티스텝 의도 표현 쪽으로
-          regularize. GT는 cmd_vel 적분 궤적. 추론 시 사용 안 함.
+    역할(cascade): backbone 을 멀티스텝 의도(미래 경로)로 학습시키는 주 신호이자,
+          SteerHead 가 읽어 조향을 만드는 입력. GT는 cmd_vel 적분 궤적.
 
     학습: pretrained 없음, 처음부터 학습
     """
@@ -182,26 +173,25 @@ class E2ENet(nn.Module):
     """
     전체 E2E 네트워크
 
-    구조:
-      LaneEncoder(lane_img)       → lane_feat   (B, 256)
-      FrontEncoder(front_img)   → front_feat (B, 256)
-                                   concat     (B, 512)
-      ControlHead(combined)     → steer, throttle
-      WaypointHead(combined)    → waypoints (B, 5, 2)
+    구조 (cascade):
+      LaneEncoder(lane_img)     → lane_feat   (B, 256)
+      FrontEncoder(front_img)   → front_feat  (B, 256)
+                                   concat      (B, 512)
+      WaypointHead(combined)    → waypoints (B, 5, 2)      [의도]
+      SteerHead(waypoints.detach().flatten) → steer, throttle  [제어, 학습된 pursuit]
 
     gradient 흐름:
-      loss.backward() 한 번으로 LaneEncoder, FrontEncoder, ControlHead,
-      WaypointHead 전체 동시 업데이트.
-      ControlHead와 WaypointHead가 같은 512-dim feature를 공유하므로
-      보조 task(waypoint)가 backbone을 의도 표현 쪽으로 regularize.
-      SegFormer, YOLO는 이 네트워크 외부에서 freeze되므로 영향 없음.
+      backbone(encoders)+WaypointHead 는 waypoint loss 로 학습(정직한 경로 유지).
+      SteerHead 는 detach 된 waypoints 를 입력으로 받아 steer loss 로만 학습 →
+      waypoint 를 왜곡하지 않는 깨끗한 waypoint→steer 변환기.
+      SegFormer, YOLO 는 이 네트워크 외부에서 freeze.
     """
     def __init__(self):
         super().__init__()
         self.lane_encoder   = LaneEncoder()
         self.front_encoder = FrontEncoder()
-        self.control_head  = ControlHead()
         self.waypoint_head = WaypointHead()
+        self.steer_head    = SteerHead()
 
     def forward(self, lane_img, front_img):
         lane_feat   = self.lane_encoder(lane_img)       # (B, 256)
@@ -209,10 +199,11 @@ class E2ENet(nn.Module):
 
         combined = torch.cat([lane_feat, front_feat], dim=1)  # (B, 512)
 
-        ctrl      = self.control_head(combined)      # (B, 2)
-        steer     = ctrl[:, 0]                       # (B,)
-        throttle  = ctrl[:, 1]                       # (B,)
-        waypoints = self.waypoint_head(combined)     # (B, 5, 2)
+        waypoints = self.waypoint_head(combined)             # (B, 5, 2)
+        # detach: waypoint 는 waypoint loss 로만 학습, steer 는 그 위를 읽기만.
+        ctrl      = self.steer_head(waypoints.detach().flatten(1))  # (B, 2)
+        steer     = ctrl[:, 0]                               # (B,)
+        throttle  = ctrl[:, 1]                               # (B,)
         return steer, throttle, waypoints
 
 
