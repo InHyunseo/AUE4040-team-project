@@ -98,6 +98,7 @@ try:
         decode_compressed,
     )
     from dataset import composite_lane, composite_front, to_input_tensor  # noqa: E402
+    from viz import draw_intent, PRED_COLOR  # noqa: E402  (디버그 오버레이용)
     _HELPER_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - reported at startup
     _HELPER_IMPORT_ERROR = exc
@@ -214,6 +215,11 @@ class E2EInferNode(Node):
         self.declare_parameter("lane_topic", "/lane_image/compressed")
         self.declare_parameter("front_topic", "/front_image/compressed")
         self.declare_parameter("cmd_topic", "/cmd_vel")
+        # 디버그 오버레이 publish 토픽. monitor 노드가 이걸 구독해 :8080 에 띄운다.
+        # publish_overlay=False 면 합성/그리기 비용을 아예 안 들인다(실주행 최종 런).
+        self.declare_parameter("publish_overlay", True)
+        self.declare_parameter("lane_overlay_topic", "/lane_intent/compressed")
+        self.declare_parameter("front_overlay_topic", "/front_det/compressed")
         self.declare_parameter("segformer_ckpt", default_seg)
         self.declare_parameter("yolo_weights", default_yolo)
         self.declare_parameter("engine_path", default_engine)
@@ -260,6 +266,15 @@ class E2EInferNode(Node):
         watchdog_hz = max(1e-3, float(self.get_parameter("watchdog_hz").value))
 
         self.pub_cmd = self.create_publisher(Twist, self.cmd_topic, 10)
+
+        # 디버그 오버레이 publisher (monitor 가 구독). best-effort depth=1 — 모니터링은
+        # 최신 한 장이면 되고 제어 경로에 부담 안 준다.
+        self.publish_overlay = bool(self.get_parameter("publish_overlay").value)
+        if self.publish_overlay:
+            self.pub_lane_ov = self.create_publisher(
+                CompressedImage, self.get_parameter("lane_overlay_topic").value, SENSOR_QOS)
+            self.pub_front_ov = self.create_publisher(
+                CompressedImage, self.get_parameter("front_overlay_topic").value, SENSOR_QOS)
 
         # Latest raw frames (decoded BGR) + their arrival time. Lane drives the
         # control loop; front is consumed opportunistically (latest available).
@@ -350,7 +365,7 @@ class E2EInferNode(Node):
 
         try:
             lane_bgr = decode_compressed(msg.data)
-            steer, throttle = self._infer(lane_bgr, front_bgr)
+            steer, throttle, lane_comp, front_comp, wp = self._infer(lane_bgr, front_bgr)
         except Exception as exc:
             self.get_logger().error(f"inference failed -> skip: {exc!r}",
                                     throttle_duration_sec=1.0)
@@ -362,16 +377,28 @@ class E2EInferNode(Node):
         self._set_target(steer, throttle)
         self._last_pub_t = now
 
+        # 디버그 오버레이: lane 합성 위에 예측 waypoint(노랑) 그려 publish, front 는
+        # bbox 합성 그대로. 학습 입력과 같은 픽셀(composite_*) 을 보여주므로 seg/bbox
+        # 품질과 모델 의도를 :8080 에서 바로 눈으로 확인할 수 있다.
+        if self.publish_overlay:
+            try:
+                lane_ov = draw_intent(lane_comp, wp, color=PRED_COLOR) if wp is not None else lane_comp
+                self.pub_lane_ov.publish(self._encode(lane_ov, msg.header))
+                self.pub_front_ov.publish(self._encode(front_comp, msg.header))
+            except Exception as exc:
+                self.get_logger().warn(f"overlay publish failed: {exc!r}",
+                                       throttle_duration_sec=2.0)
+
     # ---- core ----
 
     def _infer(self, lane_bgr: np.ndarray, front_bgr: np.ndarray):
-        """raw BGR pair -> (steer, throttle) floats in [-1, 1].
+        """raw BGR pair -> (steer, throttle, lane_comp, front_comp, waypoints).
 
         Mirrors extract_labels.py preprocessing exactly:
           lane : crop top 30% -> resize 224 -> SegFormer -> composite_lane
           front: resize 224 -> YOLO -> composite_front
-        then to_input_tensor (shared with training).
-        """
+        then to_input_tensor (shared with training). lane_comp/front_comp/wp 는
+        디버그 오버레이용으로 같이 반환(publish_overlay=False 면 호출측이 무시)."""
         # lane path
         lane_c = crop_lane_roi(lane_bgr)
         lane_c = cv2.resize(lane_c, LANE_SIZE)
@@ -389,7 +416,9 @@ class E2EInferNode(Node):
         out = self.engine.infer(lane_t, front_t)
 
         steer, throttle = self._read_control(out)
-        return float(steer), float(throttle)
+        wp = out.get("waypoints")
+        wp = np.asarray(wp).reshape(-1, 2) if wp is not None else None
+        return float(steer), float(throttle), lane_comp, front_comp, wp
 
     @staticmethod
     def _read_control(out: dict):
@@ -422,6 +451,17 @@ class E2EInferNode(Node):
             self._tgt_lin = -(0.20 + abs(steer) * 0.05)
             self._tgt_ang = steer * 1.2
             self._last_cmd_t = self._now()
+
+    def _encode(self, bgr: np.ndarray, header) -> CompressedImage:
+        """BGR uint8 -> CompressedImage(jpeg). overlay_viz_node 와 동일."""
+        ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            raise RuntimeError("cv2.imencode failed")
+        out = CompressedImage()
+        out.header = header
+        out.format = "jpeg"
+        out.data = jpg.tobytes()
+        return out
 
     def _publish_stop(self) -> None:
         # Reset the eased state too, so when driving resumes we don't ease up

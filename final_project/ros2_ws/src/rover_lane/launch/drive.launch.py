@@ -70,8 +70,9 @@ def generate_launch_description() -> LaunchDescription:
              name="rover_camera", output="screen",
              parameters=[{"fps": fps}]),
 
-        # Browser monitor: raw lane/front streams (no overlay topics here — the
-        # E2E node composites internally and doesn't publish overlays).
+        # Browser monitor: raw lane/front + E2E 디버그 오버레이(seg+예측 의도, bbox).
+        # e2e_infer_node 가 publish_overlay=True 일 때 /lane_intent · /front_det 를 낸다.
+        # raw 와 오버레이를 나란히 봐 seg/bbox 품질과 모델 의도를 한 화면에서 확인.
         Node(package="rover_camera", executable="monitor_node",
              name="rover_monitor", output="screen",
              condition=IfCondition(monitor),
@@ -81,6 +82,8 @@ def generate_launch_description() -> LaunchDescription:
                  "streams": [
                      "lane:/lane_image/compressed",
                      "front:/front_image/compressed",
+                     "lane_intent:/lane_intent/compressed",
+                     "front_det:/front_det/compressed",
                  ],
              }]),
 
