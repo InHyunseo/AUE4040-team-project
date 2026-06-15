@@ -30,3 +30,4 @@ final_project/models/e2e_best.pt
 final_project/models/*_best.pt
 final_project/rover_data/*
 !final_project/rover_data/.gitkeep
+*.tar.gz
