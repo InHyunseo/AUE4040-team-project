@@ -249,6 +249,13 @@ class E2EInferNode(Node):
         # watchdog (also ~20 Hz, like teleop) eases the published command toward
         # it each tick. smooth_alpha=0.0 disables it (publish target directly).
         self.declare_parameter("smooth_alpha", 0.35)
+        # 조향 소스: "head"=ControlHead steer 출력 직접, "pursuit"=waypoint pure pursuit.
+        # steer 라벨은 teleop raw 라 프레임마다 튀어(weaving) 학습이 노이즈를 물려받지만,
+        # waypoint 는 cmd_vel 적분 궤적이라 부드럽다. lookahead 점의 곡률로 조향을 유도하면
+        # 더 안정적. lookahead_idx 점(로봇 프레임)에서 κ=2y/L², angular≈κ·gain.
+        self.declare_parameter("steer_source", "pursuit")   # "head" | "pursuit"
+        self.declare_parameter("lookahead_idx", 3)          # wp 인덱스(0~4). 끝쪽이 부드러움
+        self.declare_parameter("pursuit_gain", 0.25)        # 곡률→정규화 조향(실측 GT스케일≈0.24)
 
         self.lane_topic = self.get_parameter("lane_topic").value
         self.front_topic = self.get_parameter("front_topic").value
@@ -264,6 +271,13 @@ class E2EInferNode(Node):
         self.cmd_timeout_s = float(self.get_parameter("cmd_timeout_s").value)
         self.smooth_alpha = min(1.0, max(0.0, float(self.get_parameter("smooth_alpha").value)))
         watchdog_hz = max(1e-3, float(self.get_parameter("watchdog_hz").value))
+        self.steer_source = str(self.get_parameter("steer_source").value).lower()
+        self.lookahead_idx = int(self.get_parameter("lookahead_idx").value)
+        self.pursuit_gain = float(self.get_parameter("pursuit_gain").value)
+        if self.steer_source not in ("head", "pursuit"):
+            self.get_logger().warn(
+                f"unknown steer_source={self.steer_source!r}, using 'head'")
+            self.steer_source = "head"
 
         self.pub_cmd = self.create_publisher(Twist, self.cmd_topic, 10)
 
@@ -371,6 +385,11 @@ class E2EInferNode(Node):
                                     throttle_duration_sec=1.0)
             return
 
+        # 조향 소스 선택: pursuit 이면 raw steer 헤드 대신 waypoint pure pursuit 로
+        # 조향 의도를 산출(부드러운 waypoint → weaving 완화). throttle 은 그대로.
+        if self.steer_source == "pursuit":
+            steer = self.pursuit_steer(wp, self.lookahead_idx, self.pursuit_gain)
+
         # Store as the latest TARGET. The watchdog (20 Hz, like teleop) eases the
         # actually-published command toward it — we do NOT publish raw here, so
         # there's a single smoothed output path matching the training cmd_vel.
@@ -436,6 +455,29 @@ class E2EInferNode(Node):
         if len(scalars) >= 2:
             return np.asarray(out[scalars[0]]).ravel()[0], np.asarray(out[scalars[1]]).ravel()[0]
         raise RuntimeError(f"cannot locate steer/throttle in engine outputs: {list(out)}")
+
+    @staticmethod
+    def pursuit_steer(wp: np.ndarray, lookahead_idx: int, gain: float) -> float:
+        """waypoint(로봇 프레임, x=전방 y=좌) → 정규화 조향 의도 [-1,1] (pure pursuit).
+
+        lookahead_idx 점 (gx,gy) 의 곡률 κ = 2·gy / L²  (L²=gx²+gy²).
+        조향 부호 규약: 이 로버는 angular.z(=steer) **양수가 우회전**(teleop d키/
+        motor_bridge). 우회전 목표는 wp.y<0(우)이므로 steer = -gain·κ 로 부호를
+        뒤집어야 GT steer 와 일치한다(실측 상관 r=+0.79, 반전 전엔 -0.79). 추론은
+        angular.z = steer*1.2 로 역변환하므로 head steer 와 같은 경로를 탄다.
+        L² 정규화라 waypoint 절대 스케일 부정확에 둔감. 끝점은 부정확하므로 맨 끝
+        (idx 4)보다 idx 3 권장. gain≈0.25 가 GT steer 스케일에 맞음(실측).
+        wp 없거나 전방거리 0 이면 0.
+        """
+        if wp is None or len(wp) == 0:
+            return 0.0
+        i = max(0, min(int(lookahead_idx), len(wp) - 1))
+        gx, gy = float(wp[i, 0]), float(wp[i, 1])
+        L2 = gx * gx + gy * gy
+        if L2 < 1e-6 or gx <= 0.0:   # 전방(+x) 목표가 아니면 조향 안 함
+            return 0.0
+        kappa = 2.0 * gy / L2
+        return float(max(-1.0, min(1.0, -gain * kappa)))   # -: 우회전(+steer)=wp.y<0
 
     def _set_target(self, steer: float, throttle: float) -> None:
         """Map model steer -> target Twist using the training control contract.
