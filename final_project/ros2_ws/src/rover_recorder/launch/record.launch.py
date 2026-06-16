@@ -8,11 +8,28 @@ here — run it in a separate SSH terminal so cbreak owns its own TTY:
 Usage:
   ros2 launch rover_recorder record.launch.py session_name:=loop_test
 """
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+
+from rover_common.constants import (
+    FRONT_DET_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    LANE_IMAGE_TOPIC,
+    LANE_SEG_TOPIC,
+)
+from rover_common.paths import find_final_project_root
+
+
+def _default_out_root() -> str:
+    try:
+        return str(find_final_project_root(__file__) / "rover_data")
+    except Exception:
+        return str(Path.home() / "rover_data")
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -38,7 +55,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument("session_name", default_value="session"),
         DeclareLaunchArgument("out_root",
-                              default_value="/home/ircv16/team/final_project/rover_data"),
+                              default_value=_default_out_root()),
         DeclareLaunchArgument("fps", default_value="15"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="motor_bridge dry run (no UART)"),
@@ -65,8 +82,8 @@ def generate_launch_description() -> LaunchDescription:
                  "host": monitor_host,
                  "port": monitor_port,
                  "streams": [
-                     "lane:/lane_image/compressed",
-                     "front:/front_image/compressed",
+                     f"lane:{LANE_IMAGE_TOPIC}",
+                     f"front:{FRONT_IMAGE_TOPIC}",
                  ],
              }]),
 
@@ -77,10 +94,10 @@ def generate_launch_description() -> LaunchDescription:
                  "host": monitor_host,
                  "port": monitor_port,
                  "streams": [
-                     "lane:/lane_image/compressed",
-                     "front:/front_image/compressed",
-                     "lane_seg:/lane_seg/compressed",
-                     "front_det:/front_det/compressed",
+                     f"lane:{LANE_IMAGE_TOPIC}",
+                     f"front:{FRONT_IMAGE_TOPIC}",
+                     f"lane_seg:{LANE_SEG_TOPIC}",
+                     f"front_det:{FRONT_DET_TOPIC}",
                  ],
              }]),
 

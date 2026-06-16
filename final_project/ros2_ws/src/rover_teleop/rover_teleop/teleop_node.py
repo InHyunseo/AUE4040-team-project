@@ -29,22 +29,20 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, Int8
 
-
-BASE_V       = 0.20
-TURN_V       = 0.25
-MAX_OMEGA    = 1.2
-LEVELS       = 2   # 좌/우 두 번 누르면 최대 회전 (turn_level ∈ -2..+2)
-SMOOTH_ALPHA = 0.35
-TICK_HZ      = 20.0
+from rover_common.constants import (
+    CMD_VEL_TOPIC,
+    LEVELS,
+    RECORD_ENABLE_TOPIC,
+    SMOOTH_ALPHA,
+    STEER_LEVEL_TOPIC,
+    TICK_HZ,
+    TURN_FRAC,
+)
+from rover_common.control import approach, steer_to_cmd_vel
 
 # Per-|level| steering fraction (0..1). lv1 sits close to lv2 so it's a slightly
 # softer version of the full turn rather than a much weaker one.
 #   index 0 = level 0, 1 = level 1, 2 = level 2(max)
-TURN_FRAC    = (0.0, 0.8, 1.0)
-
-
-def approach(cur: float, target: float, alpha: float) -> float:
-    return cur + (target - cur) * alpha
 
 
 def drain_stdin() -> str:
@@ -60,9 +58,9 @@ def drain_stdin() -> str:
 class TeleopNode(Node):
     def __init__(self) -> None:
         super().__init__("rover_teleop")
-        self.pub_cmd     = self.create_publisher(Twist,  "/cmd_vel",       10)
-        self.pub_level   = self.create_publisher(Int8,   "/steer_level",   10)
-        self.pub_rec     = self.create_publisher(Bool,   "/record_enable", 10)
+        self.pub_cmd     = self.create_publisher(Twist,  CMD_VEL_TOPIC,       10)
+        self.pub_level   = self.create_publisher(Int8,   STEER_LEVEL_TOPIC,   10)
+        self.pub_rec     = self.create_publisher(Bool,   RECORD_ENABLE_TOPIC, 10)
 
         self.turn_level  = 0
         self.driving     = False
@@ -98,9 +96,8 @@ class TeleopNode(Node):
             return 0.0, 0.0
         sign = 1.0 if self.turn_level >= 0 else -1.0
         a = TURN_FRAC[abs(self.turn_level)]   # steering fraction for this level
-        lin = -(BASE_V + a * (TURN_V - BASE_V))
-        ang = sign * a * MAX_OMEGA
-        return lin, ang
+        # steer = sign·fraction ∈ [-1, 1]; shared mapping couples speed to |steer|.
+        return steer_to_cmd_vel(sign * a)
 
     def _handle_keys(self) -> bool:
         """Return True if quit was requested."""

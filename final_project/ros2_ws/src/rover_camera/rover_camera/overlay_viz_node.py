@@ -9,8 +9,6 @@ publishes JPEG overlays:
 """
 from __future__ import annotations
 
-import os
-import sys
 import threading
 from importlib.util import find_spec
 from pathlib import Path
@@ -19,56 +17,34 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
 
-# 실시간 오버레이 소비자용 QoS: 최신 프레임만(depth=1) + best-effort.
-# 모니터링 경로라 밀린 프레임은 버려 지연 누적을 끊는다(camera_node RELIABLE pub과 매칭).
-# 학습 bag을 저장하는 bag_recorder 는 RELIABLE 유지(완결성 필요) — 여기엔 쓰지 않는다.
-SENSOR_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=1,
+from rover_common.constants import (
+    FRONT_DET_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    LANE_IMAGE_TOPIC,
+    LANE_SEG_TOPIC,
 )
-
-
-def _find_project_root() -> Path | None:
-    env = os.environ.get("AUE4040_FINAL_PROJECT_ROOT")
-    if env:
-        root = Path(env).expanduser().resolve()
-        if (root / "data_pipeline" / "extract_labels.py").exists():
-            return root
-
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "data_pipeline" / "extract_labels.py").exists():
-            return parent
-    return None
-
-
-PROJECT_ROOT = _find_project_root()
-if PROJECT_ROOT is not None:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from rover_common.image_io import encode_bgr
+from rover_common.paths import find_final_project_root
+from rover_common.qos import SENSOR_QOS
 
 try:
+    PROJECT_ROOT = find_final_project_root(__file__)
     from data_pipeline.extract_labels import (  # noqa: E402
         FRONT_SIZE,
         LANE_SIZE,
-        SEG_N_CLASSES,
         SegFormerLaneSeg,
         YoloCarDet,
         crop_lane_roi,
     )
-except Exception as exc:  # pragma: no cover - reported clearly at node startup
-    _HELPER_IMPORT_ERROR = exc
-else:
+    # Same overlay-compositing contract the dataset/inference path uses, so the
+    # browser preview matches training inputs pixel-for-pixel.
+    from data_pipeline.preprocess import composite_lane, composite_front  # noqa: E402
     _HELPER_IMPORT_ERROR = None
-
-
-SEG_COLORS_BGR = (
-    np.array((0, 0, 255), dtype=np.float32),  # left-solid: red
-    np.array((0, 255, 0), dtype=np.float32),  # right-solid: green
-    np.array((255, 0, 0), dtype=np.float32),  # center-dashed: blue
-)
+except Exception as exc:  # pragma: no cover - reported clearly at node startup
+    PROJECT_ROOT = None
+    _HELPER_IMPORT_ERROR = exc
 
 
 class OverlayVizNode(Node):
@@ -84,10 +60,10 @@ class OverlayVizNode(Node):
         default_seg = PROJECT_ROOT / "models" / "segformer_lane" if PROJECT_ROOT else ""
         default_yolo = PROJECT_ROOT / "models" / "best.pt" if PROJECT_ROOT else ""
 
-        self.declare_parameter("lane_topic", "/lane_image/compressed")
-        self.declare_parameter("front_topic", "/front_image/compressed")
-        self.declare_parameter("lane_overlay_topic", "/lane_seg/compressed")
-        self.declare_parameter("front_overlay_topic", "/front_det/compressed")
+        self.declare_parameter("lane_topic", LANE_IMAGE_TOPIC)
+        self.declare_parameter("front_topic", FRONT_IMAGE_TOPIC)
+        self.declare_parameter("lane_overlay_topic", LANE_SEG_TOPIC)
+        self.declare_parameter("front_overlay_topic", FRONT_DET_TOPIC)
         self.declare_parameter("segformer_ckpt", str(default_seg))
         self.declare_parameter("yolo_weights", str(default_yolo))
         self.declare_parameter("device", "cuda")
@@ -95,12 +71,10 @@ class OverlayVizNode(Node):
         self.declare_parameter("enable_det", True)
         self.declare_parameter("viz_fps", 3.0)
         self.declare_parameter("jpeg_quality", 85)
-        self.declare_parameter("seg_alpha", 0.6)
         self.declare_parameter("yolo_imgsz", 320)
         self.declare_parameter("yolo_conf", 0.25)
 
         self.jpeg_q = int(self.get_parameter("jpeg_quality").value)
-        self.seg_alpha = min(1.0, max(0.0, float(self.get_parameter("seg_alpha").value)))
         self.enable_seg = bool(self.get_parameter("enable_seg").value)
         self.enable_det = bool(self.get_parameter("enable_det").value)
         self._check_runtime_deps()
@@ -257,29 +231,24 @@ class OverlayVizNode(Node):
         lane = cv2.resize(crop_lane_roi(_decode_jpeg(msg)), LANE_SIZE)
         if self.segmenter is None:
             _put_status(lane, self._seg_status)
-            return self._encode(lane, msg)
+            return encode_bgr(lane, msg.header, self.jpeg_q)
         seg = self.segmenter(lane)
-        overlay = _overlay_seg(lane, seg, self.seg_alpha)
-        return self._encode(overlay, msg)
+        # Shared compositing → preview matches the training/inference lane input
+        # pixel-for-pixel (fixed SEG_ALPHA, not a monitor-only knob).
+        overlay = composite_lane(lane, seg)
+        return encode_bgr(overlay, msg.header, self.jpeg_q)
 
     def _process_front(self, msg: CompressedImage) -> CompressedImage:
         front = cv2.resize(_decode_jpeg(msg), FRONT_SIZE)
         if self.detector is None:
             _put_status(front, self._det_status)
-            return self._encode(front, msg)
+            return encode_bgr(front, msg.header, self.jpeg_q)
         det = self.detector(front)
-        overlay = _overlay_det(front, det)
-        return self._encode(overlay, msg)
-
-    def _encode(self, bgr: np.ndarray, src: CompressedImage) -> CompressedImage:
-        ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_q])
-        if not ok:
-            raise RuntimeError("cv2.imencode failed")
-        out = CompressedImage()
-        out.header = src.header
-        out.format = "jpeg"
-        out.data = jpg.tobytes()
-        return out
+        # composite_front draws the same bbox the model sees; add a conf label on
+        # top for the human monitor (debug-only, not part of the model input).
+        overlay = composite_front(front, det)
+        _label_det(overlay, det)
+        return encode_bgr(overlay, msg.header, self.jpeg_q)
 
 
 def _decode_jpeg(msg: CompressedImage) -> np.ndarray:
@@ -290,22 +259,11 @@ def _decode_jpeg(msg: CompressedImage) -> np.ndarray:
     return bgr
 
 
-def _overlay_seg(lane: np.ndarray, seg: np.ndarray, alpha: float) -> np.ndarray:
-    vis = lane.copy()
-    base = 1.0 - alpha
-    for c in range(SEG_N_CLASSES):
-        mask = seg[c] > 0
-        vis[mask] = (vis[mask].astype(np.float32) * base + SEG_COLORS_BGR[c] * alpha)
-    return vis.astype(np.uint8)
-
-
-def _overlay_det(front: np.ndarray, det: np.ndarray) -> np.ndarray:
-    vis = front.copy()
+def _label_det(vis: np.ndarray, det: np.ndarray) -> None:
+    """Debug-only conf label above the bbox (the box itself is drawn by
+    composite_front, identical to the model input)."""
     if det[4] > 0:
-        x, y, w, h, conf = det
-        pt1 = (int(x), int(y))
-        pt2 = (int(x + w), int(y + h))
-        cv2.rectangle(vis, pt1, pt2, (0, 255, 0), 2)
+        x, y, _, _, conf = det
         cv2.putText(
             vis,
             f"car {conf:.2f}",
@@ -315,7 +273,6 @@ def _overlay_det(front: np.ndarray, det: np.ndarray) -> np.ndarray:
             (0, 255, 0),
             1,
         )
-    return vis
 
 
 def _put_status(img: np.ndarray, text: str) -> None:

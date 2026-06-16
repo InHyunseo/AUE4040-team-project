@@ -40,9 +40,9 @@
 
   | level | linear.x | angular.z |
   |---:|---:|---:|
-  | 0  | -0.15 | 0.00  |
-  | ±1 | -0.20 | ±0.40 |
-  | ±2 | -0.25 | ±0.80 |
+  | 0  | -0.20 | 0.00  |
+  | ±1 | -0.24 | ±0.96 |
+  | ±2 | -0.25 | ±1.20 |
 
 - `approach()` smoothing(α=0.35, 20Hz)으로 cmd_vel이 연속적으로 변함 → 라벨 품질↑.
   이 coupling이 곧 학습 분포가 되고, 모델 출력 역변환도 동일 공식 사용.
@@ -108,8 +108,8 @@ rosbag (대량 텔레옵 주행)
 ```
 오버레이 Lane 이미지  → LaneEncoder (ResNet18-A) → 256d ┐
 오버레이 Front 이미지 → FrontEncoder(ResNet18-B) → 256d ┘ concat(512)
-                                     ├→ ControlHead  → steer, throttle (Tanh, 메인)
-                                     └→ WaypointHead → waypoints 5×2 (보조)
+                                     ├→ ControlHead  → steer, throttle (Tanh)
+                                     └→ WaypointHead → waypoints 5×2 → pure pursuit → 조향(확정)
 ```
 
 ### 정확히 뭘 학습하나 (앞 슬라이드와 연결)
@@ -126,7 +126,10 @@ rosbag (대량 텔레옵 주행)
 loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)
 ```
 
-- 메인 = steer/throttle(실제 제어). 보조 = waypoint(cmd_vel 적분한 미래 0.5초 궤적, 추론 시 버림).
+- **확정 조향 = waypoint pursuit**(cmd_vel 적분한 미래 2.5초 궤적에 pure pursuit).
+  raw steer 헤드는 정확도 하한에 걸려, 부드러운 waypoint 추종이 더 안정적.
+- 실차 추론은 `steer_source`로 waypoint pursuit(기본·검증) 또는 ControlHead steer(폴백)를
+  고른다. throttle 출력은 진단용이고 실제 속도는 `|steer|` coupling.
 - 두 헤드가 **같은 512-d feature 공유** → 보조 task가 backbone을 "옆으로 비켰다 복귀하는 추월 의도" 쪽으로 **regularize** → 메인 일반화↑.
 - 명시적 추월 규칙 없이 텔레옵 분포를 모방 → **자율 주행·추월이 창발**.
 
@@ -136,7 +139,8 @@ loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)
 
 ### ROS2 시스템 / 동시성
 - 노드 5개(camera/monitor/teleop/motor_bridge/bag_recorder) 단일 책임 분리.
-- `MultiThreadedExecutor` + `ReentrantCallbackGroup` — 수신/추론/제어 스레드 분리(블로킹 방지).
+- 카메라 reader thread 분리 + 추론 단일 통합 노드 + watchdog timer — 수신 신선도, 저지연,
+  deadman stop을 각각 분리.
 - 카메라 hot-path: jetcam **native BGR 그대로 JPEG 인코딩** → BGR↔RGB 왕복 제거.
   리더 스레드 분리, capture_fps 2배로 버퍼 신선. `header.stamp`는 **캡처 시각**(publish 아님) → 두 카메라 정합 정확.
 - DDS/QoS: `ROS_LOCALHOST_ONLY=1`로 외부 멀티캐스트 차단(지연↓). 이미지 토픽은
@@ -151,6 +155,8 @@ loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)
 ### 임베디드 배포 최적화
 - PyTorch → ONNX → Jetson `trtexec --fp16` TensorRT engine.
   **engine은 Jetson에서만 빌드**(아키텍처 박힘). YOLO26은 NMS-free라 후처리 없이 변환.
+- 최종 주행은 `monitor:=false publish_overlay:=false`로 디버그 JPEG 비용 제거. 제어율이 낮으면
+  overlay off → YOLO 격프레임 → SegFormer TensorRT 순서로 최적화.
 
 ---
 

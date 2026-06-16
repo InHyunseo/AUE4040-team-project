@@ -23,18 +23,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
 
-# 실시간 모니터링 소비자용 QoS: 최신 프레임만(depth=1) + best-effort.
-# 화면은 "지금"이 중요하므로 밀린 프레임은 버리고 재전송도 안 해 지연 누적을 끊는다.
-# camera_node 송신은 RELIABLE이라 (pub RELIABLE ↔ sub BEST_EFFORT) 매칭된다.
-# 학습 데이터를 저장하는 bag_recorder 는 이 QoS를 쓰면 안 된다(완결성 필요 → RELIABLE).
-SENSOR_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=1,
-)
+from rover_common.constants import FRONT_IMAGE_TOPIC, LANE_IMAGE_TOPIC
+from rover_common.qos import SENSOR_QOS
 
 BOUNDARY = "rovermonitorframe"
 
@@ -148,7 +140,7 @@ class MonitorNode(Node):
         # "key:topic" pairs. Add lane-seg / detection overlays here when available.
         self.declare_parameter(
             "streams",
-            ["lane:/lane_image/compressed", "front:/front_image/compressed"],
+            [f"lane:{LANE_IMAGE_TOPIC}", f"front:{FRONT_IMAGE_TOPIC}"],
         )
 
         host = str(self.get_parameter("host").value)

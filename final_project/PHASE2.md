@@ -17,7 +17,7 @@
 1. 대량 rosbag 수집 (라벨링 X)   → final_project/rover_data/<session>_<ts>/bag
 2. 라벨 자동 추출                → labels_cache.h5  (SegFormer/YOLO freeze + cmd_vel)
 3. 라벨 검증 (눈 확인)           → debug_samples/*.png
-4. E2E 학습 (Colab)             → e2e_best.pt  (train_e2e.py, 의도 시각화/이어학습 지원)
+4. E2E 학습 (Kaggle/Colab)      → e2e_best.pt  (train_e2e.py, 의도 시각화/이어학습 지원)
 5. ONNX export                  → e2e.onnx     (export_onnx.py)
 ─────────────────────────  여기까지 Phase 2  ─────────────────────────
 6~7. Jetson engine 빌드 + rover_lane 추론 노드 + 주행 모니터링 + 추가학습 → PHASE3.md
@@ -90,8 +90,8 @@ python3 extract_labels.py \
 - `--limit N` : 앞 N 프레임만 (빠른 디버그용, 0=전체).
 - `--debug_dir DIR` : **줄 때만** 검증용 디버그 PNG(~100장) 저장. 생략하면 안 만든다
   (bag마다 같은 폴더에 쌓이지 않게 기본은 끔). 첫 검증 때만 한 번 주면 충분.
-- bag 여러 개면 각각 다른 `--out`으로 추출 후 학습 때 합치거나, 스크립트를
-  확장해 누적. (현재는 1 bag → 1 h5.)
+- bag 여러 개면 `--bag_root ... --out_dir labels_all`로 한 번에 추출한다. 각 bag은
+  `<out_dir>/<세션명>.h5`로 저장되고, 모델은 한 번만 로드된다.
 
 ### labels_cache.h5 스키마
 
@@ -112,7 +112,7 @@ python3 extract_labels.py \
 | `front` | (224,224,3) | uint8 | raw front 이미지, resize (**BGR**) |
 | `seg` | (3,224,224) | uint8 | SegFormer 마스크 {0,255}. ch0=좌실선/ch1=우실선/ch2=중앙점선 |
 | `det` | (5,) | float32 | YOLO car bbox `[x,y,w,h,conf]` (front 픽셀). 차 없으면 0 |
-| `waypoint` | (5,2) | float32 | cmd_vel 적분 미래 0.5초 궤적 (로봇 프레임, 미터) |
+| `waypoint` | (5,2) | float32 | cmd_vel 적분 미래 2.5초 궤적 (로봇 프레임, 미터) |
 | `steer` | () | float32 | angular.z at t |
 | `throttle` | () | float32 | linear.x at t |
 | `timestamp_ns` | () | int64 | lane 프레임 **캡처 시각**(`header.stamp`) |
@@ -128,12 +128,12 @@ python3 extract_labels.py \
 
 ---
 
-## 3단계 — E2E 학습 (Colab)
+## 3단계 — E2E 학습 (Kaggle/Colab)
 
 > 구현됨: [training/dataset.py](training/dataset.py)(H5→오버레이 합성 Dataset),
 > [training/train_e2e.py](training/train_e2e.py)(학습 루프),
 > [training/export_onnx.py](training/export_onnx.py)(5단계 ONNX),
-> [training/train_e2e_colab.ipynb](training/train_e2e_colab.ipynb)(Colab).
+> [training/e2e-train_kaggle.ipynb](training/e2e-train_kaggle.ipynb)(Kaggle/Colab).
 
 모델: [model.py](model.py) 의 `E2ENet`
 - `LaneEncoder` / `FrontEncoder` (ResNet18×2, ImageNet pretrained) → 각 256-d
@@ -143,19 +143,42 @@ python3 extract_labels.py \
 - **lane 입력** = raw lane 이미지에 seg 3채널을 색으로 alpha-blend
   (ch0=red, ch1=green, ch2=blue; `visualize_labels.overlay_seg`와 동일 방식).
 - **front 입력** = raw front 이미지에 car bbox 그림 (`det[4] > 0`일 때).
-- 둘 다 (3, 224, 224), **BGR** 채널 순서 유지. ImageNet 정규화는 BGR 기준으로 적용하거나
-  RGB로 변환 후 정규화하되 **추론과 동일하게** 맞출 것.
+- 둘 다 합성까지는 **BGR**. 텐서화 직전에 `to_input_tensor()`가 BGR→RGB 변환 후
+  ImageNet mean/std로 정규화한다. 추론 노드도 같은 함수를 import해 픽셀 계약을 맞춘다.
 
 ### 손실
 ```
 loss = 1.0·MSE(steer) + 0.5·MSE(throttle) + 0.5·MSE(waypoint)   # E2ELoss 기본값
 ```
-waypoint는 보조 task(추론 시 버림) — backbone을 멀티스텝 의도 쪽으로 regularize.
+waypoint는 보조 task로 학습한다. 실차 추론에서는 launch 파라미터로 `head` 조향 또는
+`waypoint` 기반 조향을 고를 수 있고, 현재 검증 기본값은 `steer_source:=waypoint`,
+`steer_mode:=pursuit`이다. throttle 출력은 진단용으로 유지하되 실제 속도는 검증된
+`|steer|` coupling으로 만든다.
 
-### Colab 흐름 (TODO 노트북 `training/train_e2e_colab.ipynb`)
+### 학습 전 H5 audit / legacy waypoint 부호
+
+학습 전에 H5 분포와 waypoint 부호 설정을 확인한다:
+
+```bash
+cd final_project/training
+python3 audit_h5.py --cache phase2_*.h5
+
+# 옛 extract_labels 부호 버그로 만든 legacy H5는 Kaggle 노트북과 동일하게:
+python3 audit_h5.py --cache phase2_*.h5 --wp_fix_sign
+```
+
+- **legacy H5**: `WP_FIX_SIGN=True` 로 두고 `train_e2e.py`에 `--wp_fix_sign`을 넘긴다.
+  이 옵션은 `waypoint[:, 0]`(전방 x)만 반전한다.
+- **수정 후 새 H5**: `WP_FIX_SIGN=False` 로 두고 변환 없이 학습한다.
+- `zero-control ratio`, `det ratio`, `steer/throttle` 범위, effective waypoint 방향을 보고
+  의도한 세션만 학습에 포함한다. 음수 raw waypoint x 자체는 legacy H5에서는 정상이다.
+
+### Colab 흐름 (`training/e2e-train_kaggle.ipynb`)
 1. `labels_cache.h5` 업로드(또는 Drive 마운트) → `Dataset`이 H5에서 오버레이 합성
 2. `E2ENet` 학습 (train/val split, AdamW, early-stop)
-3. best 체크포인트 저장 → 5단계 ONNX export로 연결
+3. `WP_FIX_SIGN`, `AVOID_OVERSAMPLE`, `STEER_SMOOTH`, `WAYPOINT_WEIGHT`,
+   `RESUME`/`FINETUNE` 값을 데이터 목적에 맞게 설정
+4. best 체크포인트 저장 → 5단계 ONNX export로 연결
 
 ---
 
@@ -175,7 +198,9 @@ torch.onnx.export(
     opset_version=13, do_constant_folding=True)
 ```
 
-추론(실주행)에서는 `waypoints` 출력은 사용하지 않는다(시각화 전용).
+추론(실주행)에서는 `waypoints`를 디버그 오버레이에 그리고, 기본 설정에서는 waypoint 기반
+pure-pursuit 조향에도 사용할 수 있다. `steer_source:=head`로 바꾸면 ControlHead steer를
+직접 사용한다.
 
 ---
 

@@ -1,14 +1,13 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>rover_camera</name>
+  <name>rover_common</name>
   <version>0.1.0</version>
-  <description>Dual CSI camera publisher, live model overlays, and browser monitor.</description>
+  <description>Shared constants, control/QoS/image helpers, and path helpers for the rover final project.</description>
   <maintainer email="inhsroy@hanyang.ac.kr">hyunseo</maintainer>
   <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>rover_common</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

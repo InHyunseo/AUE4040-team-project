@@ -27,12 +27,20 @@ from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool
 
+from rover_common.constants import (
+    CMD_VEL_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    LANE_IMAGE_TOPIC,
+    RECORD_ENABLE_TOPIC,
+    STEER_LEVEL_TOPIC,
+)
+
 
 DEFAULT_TOPICS = [
-    "/lane_image/compressed",
-    "/front_image/compressed",
-    "/cmd_vel",
-    "/steer_level",
+    LANE_IMAGE_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    CMD_VEL_TOPIC,
+    STEER_LEVEL_TOPIC,
 ]
 
 
@@ -58,8 +66,8 @@ class BagRecorderNode(Node):
         self._bag_started_at: float | None = None
         self._got_lane_after_start = False
 
-        self.create_subscription(Bool, "/record_enable", self._on_toggle, 10)
-        self.create_subscription(CompressedImage, "/lane_image/compressed",
+        self.create_subscription(Bool, RECORD_ENABLE_TOPIC, self._on_toggle, 10)
+        self.create_subscription(CompressedImage, LANE_IMAGE_TOPIC,
                                  self._on_lane, 10)
         self.create_timer(1.0, self._watchdog)
         self.get_logger().info(
@@ -122,7 +130,7 @@ class BagRecorderNode(Node):
         elapsed = time.time() - self._bag_started_at
         if (not self._got_lane_after_start) and elapsed > self.frame_deadline_s:
             self.get_logger().error(
-                f"NO /lane_image/compressed frames seen in {elapsed:.1f}s after bag start. "
+                f"NO {LANE_IMAGE_TOPIC} frames seen in {elapsed:.1f}s after bag start. "
                 "Is rover_camera running?  Stopping bag to avoid junk data."
             )
             self._stop()

@@ -1,6 +1,6 @@
-# ros2_ws — data collection stack
+# ros2_ws — rover runtime stack
 
-데이터 수집 전용 ROS2 워크스페이스.
+데이터 수집과 실차 추론을 함께 담은 ROS2 워크스페이스.
 
 ## 패키지
 
@@ -10,8 +10,10 @@
 | `rover_camera`   | `overlay_viz_node`   | frozen SegFormer/YOLO → `/lane_seg/compressed`, `/front_det/compressed` 실시간 오버레이 |
 | `rover_camera`   | `monitor_node`       | 카메라 JPEG를 재인코딩 없이 브라우저 MJPEG로 스트림 (`http://<host>:8080/`) |
 | `rover_teleop`   | `teleop_node`        | 키보드(cbreak) 1D steering level → `/cmd_vel`, `/steer_level`, `/record_enable` |
-| `rover_recorder` | `motor_bridge_node`  | `/cmd_vel` → UART (데이터 수집 전용) |
+| `rover_recorder` | `motor_bridge_node`  | `/cmd_vel` → UART (수집/실차 추론 공통) |
 | `rover_recorder` | `bag_recorder_node`  | `/record_enable` 토글 시 `ros2 bag record` 자동 시작/종료. lane 프레임 없으면 종료 |
+| `rover_lane`     | `e2e_infer_node`     | raw 카메라 → SegFormer/YOLO/E2E → `/cmd_vel`, `/lane_intent/compressed` |
+| `rover_common`   | -                    | 토픽명·제어 상수(`constants`), steer↔cmd_vel·smoothing(`control`), 공용 QoS(`qos`), JPEG 인코딩(`image_io`), repo 경로 helper(`paths`) |
 
 > 두 카메라 모두 raw로 녹화하고, 차선 세그 헤드는 raw lane 이미지 위에서 동작한다.
 
@@ -24,6 +26,7 @@
 /front_image/compressed  sensor_msgs/CompressedImage  # sensor 1, 객체인식 헤드
 /lane_seg/compressed     sensor_msgs/CompressedImage  # optional: lane + SegFormer overlay
 /front_det/compressed    sensor_msgs/CompressedImage  # optional: front + YOLO bbox overlay
+/lane_intent/compressed  sensor_msgs/CompressedImage  # optional: lane + predicted waypoint intent
 /cmd_vel                 geometry_msgs/Twist          # linear.x throttle, angular.z steering
 /steer_level             std_msgs/Int8                # -2..+2 raw teleop
 /record_enable           std_msgs/Bool                # bag on/off toggle
@@ -32,7 +35,7 @@
 ## 빌드
 
 ```bash
-cd /home/ircv16/team/final_project/ros2_ws
+cd ~/team/final_project/ros2_ws
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -79,7 +82,7 @@ python3 -c "import numpy, torch, transformers, ultralytics; print(numpy.__versio
 
 **별도 SSH 터미널 1개** — 키보드 텔레옵:
 ```bash
-cd /home/ircv16/team/final_project/ros2_ws
+cd ~/team/final_project/ros2_ws
 source install/setup.bash
 ros2 run rover_teleop teleop_node
 ```
@@ -101,3 +104,12 @@ ros2 run rover_teleop teleop_node
 - `q` 또는 `ESC` : 종료
 
 녹화 결과: `final_project/rover_data/<session>_<ts>/bag/` → 그대로 `extract_labels.py --bag`에 입력.
+
+### 실차 추론
+
+```bash
+ros2 launch rover_lane drive.launch.py monitor:=false publish_overlay:=false
+```
+
+디버그 화면이 필요하면 `monitor:=true publish_overlay:=true`로 raw `lane/front`와
+`lane_intent/front_det`를 함께 본다. 최종 주행은 디버그 JPEG 비용을 줄이기 위해 둘 다 끄는 것을 권장한다.

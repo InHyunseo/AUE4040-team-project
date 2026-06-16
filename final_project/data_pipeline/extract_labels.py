@@ -64,9 +64,9 @@ FRONT_TOPIC = "/front_image/compressed"
 CMD_TOPIC   = "/cmd_vel"
 
 SYNC_TOL_NS = 50_000_000      # 50 ms
-# 로버 실측 속도가 ~0.22 m/s 로 느려(ipynb GT wp[-1]≈11cm@0.5s), 0.5s horizon
+# 로버 실측 속도가 ~0.22 m/s 로 느려 짧은 horizon
 # 이면 점들이 trivial 하게 뭉쳐 val wp loss~0 이 됐다. horizon 을 2.5s(5배)로
-# 늘려 끝점 ~55cm, 간격 0.5s≈11cm 로 벌려 직진/코너가 구분되는 의미있는 궤적을
+# 늘려 끝점 ~55cm, 간격 0.5 s≈11cm 로 벌려 직진/코너가 구분되는 의미있는 궤적을
 # 학습시킨다. 저속이라 2.5s 여도 공간적으로 짧아 현재 장면으로 예측 가능한 범위.
 # 점 수 WP_N 은 5 유지 — 기존 5점 모델과 출력 shape 호환(resume 가능).
 # 주의: horizon 만큼 각 bag 끝부분(2.5s 분량) 샘플이 cmd_vel 커버리지 부족으로 버려진다.

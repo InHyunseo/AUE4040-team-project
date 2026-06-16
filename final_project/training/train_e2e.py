@@ -37,8 +37,8 @@ sys.path.insert(0, str(_HERE.parent))   # final_project/ → model.py
 sys.path.insert(0, str(_HERE))          # training/      → dataset.py
 from model import E2ENet, E2ELoss  # noqa: E402
 
-from dataset import (E2EDataset, make_splits, oversample_avoidance,  # noqa: E402
-                     IMAGENET_MEAN, IMAGENET_STD)
+from dataset import E2EDataset, make_splits, oversample_avoidance  # noqa: E402
+from data_pipeline.preprocess import IMAGENET_MEAN, IMAGENET_STD  # noqa: E402
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from viz import pred_vs_gt_panel  # noqa: E402
@@ -243,9 +243,9 @@ def main():
               f"val {va['total']:.4f} (s{va['steer']:.4f} t{va['throttle']:.4f} w{va['wp']:.4f})  "
               f"lr {lr_now:.2e}  {dt:.0f}s")
 
-        # best/early-stop 은 val *steer* 기준. steer 만 실제 구동에 쓰이므로(throttle 은
-        # |steer| 로 재구성, waypoint 는 추론 미사용) total 로 고르면 잡음 큰 wp/throttle
-        # 이 steer-최적 아닌 epoch 를 고른다.
+        # best/early-stop 은 val *steer* 기준. throttle 은 |steer| 로 재구성되고,
+        # waypoint 는 보조/선택적 조향 신호라 total 로 고르면 잡음 큰 wp/throttle 이
+        # steer-최적 아닌 epoch 를 고를 수 있다.
         improved = va["steer"] < best_val - 1e-5
         if improved:
             best_val = va["steer"]

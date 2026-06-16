@@ -10,7 +10,7 @@ and publishes /cmd_vel so motor_bridge_node drives the rover:
                                                                         ▼
                                           E2ENet (TensorRT fp16 engine)
                                                   steer, throttle, wp
-                                                        │ (waypoints unused)
+                                                        │ (wp pursuit by default, head steer optional)
                                                         ▼
                               linear.x = -(0.20 + |steer|*0.05)   (neg = forward)
                               angular.z = steer * 1.2
@@ -40,55 +40,37 @@ Or via launch (camera + motor_bridge + this):
 """
 from __future__ import annotations
 
-import os
-import sys
 import threading
-from pathlib import Path
 
 import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
 from geometry_msgs.msg import Twist
 
-
-# Camera publishes RELIABLE/KEEP_LAST depth=1; subscribe BEST_EFFORT depth=1 so
-# we always act on the freshest frame and never queue stale ones (control wants
-# latest, not complete). depth=1 matches the "no stale frames" intent.
-SENSOR_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=1,
+from rover_common.constants import (
+    CMD_VEL_TOPIC,
+    E2E_FRONT_INPUT,
+    E2E_LANE_INPUT,
+    E2E_STEER_OUTPUT,
+    E2E_THROTTLE_OUTPUT,
+    E2E_WAYPOINT_OUTPUT,
+    FRONT_DET_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    LANE_IMAGE_TOPIC,
+    LANE_INTENT_TOPIC,
 )
+from rover_common.control import approach, steer_to_cmd_vel
+from rover_common.image_io import encode_bgr
+from rover_common.qos import SENSOR_QOS
+from rover_common.paths import ensure_final_project_on_path
 
-
-def _find_project_root() -> Path | None:
-    """Locate final_project/ so data_pipeline + training imports resolve.
-
-    Same contract as overlay_viz_node: env override, else walk up from here.
-    """
-    env = os.environ.get("AUE4040_FINAL_PROJECT_ROOT")
-    if env:
-        root = Path(env).expanduser().resolve()
-        if (root / "data_pipeline" / "extract_labels.py").exists():
-            return root
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "data_pipeline" / "extract_labels.py").exists():
-            return parent
-    return None
-
-
-PROJECT_ROOT = _find_project_root()
-if PROJECT_ROOT is not None:
-    sys.path.insert(0, str(PROJECT_ROOT))                 # data_pipeline.*, model
-    sys.path.insert(0, str(PROJECT_ROOT / "training"))    # dataset.*
-
-# Frozen Phase-1 perception helpers + preprocessing contract. Imported lazily-ish
-# (at module load) but failures are surfaced clearly at node construction so a
-# missing dep doesn't crash with an opaque traceback.
 try:
+    PROJECT_ROOT = ensure_final_project_on_path(__file__)
+    # Frozen Phase-1 perception helpers + preprocessing contract. Imported
+    # lazily-ish (at module load) but failures are surfaced clearly at node
+    # construction so a missing dep doesn't crash with an opaque traceback.
     from data_pipeline.extract_labels import (  # noqa: E402
         LANE_SIZE,
         FRONT_SIZE,
@@ -97,10 +79,16 @@ try:
         crop_lane_roi,
         decode_compressed,
     )
-    from dataset import composite_lane, composite_front, to_input_tensor  # noqa: E402
+    # Shared preprocessing contract (no longer importing from training/dataset).
+    from data_pipeline.preprocess import (  # noqa: E402
+        composite_lane,
+        composite_front,
+        to_input_tensor,
+    )
     from viz import draw_intent, PRED_COLOR  # noqa: E402  (디버그 오버레이용)
     _HELPER_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - reported at startup
+    PROJECT_ROOT = None
     _HELPER_IMPORT_ERROR = exc
 
 
@@ -139,7 +127,7 @@ class TRTEngine:
         self.context = self.engine.create_execution_context()
 
         # Discover tensor names/roles. The exporter names inputs lane/front and
-        # outputs steer/throttle/waypoints (export_onnx.py dynamic_axes keys).
+        # outputs steer/throttle/waypoints (export_onnx.py output_names).
         self.input_names = []
         self.output_names = []
         for i in range(self.engine.num_io_tensors):
@@ -176,8 +164,8 @@ class TRTEngine:
         tensors by name when present, else by I/O order.
         """
         torch = self.torch
-        if "lane" in self.input_names and "front" in self.input_names:
-            feeds = {"lane": lane_chw, "front": front_chw}
+        if E2E_LANE_INPUT in self.input_names and E2E_FRONT_INPUT in self.input_names:
+            feeds = {E2E_LANE_INPUT: lane_chw, E2E_FRONT_INPUT: front_chw}
         else:
             feeds = {self.input_names[0]: lane_chw, self.input_names[1]: front_chw}
 
@@ -205,21 +193,22 @@ class E2EInferNode(Node):
             raise RuntimeError(
                 "failed to import perception/preprocessing helpers. Run with "
                 "--symlink-install from final_project/ros2_ws or set "
-                "AUE4040_FINAL_PROJECT_ROOT=/path/to/final_project"
+                "AUE4040_FINAL_PROJECT_ROOT=/path/to/final_project "
+                "(or AUE4040_REPO_ROOT=/path/to/AUE4040)"
             ) from _HELPER_IMPORT_ERROR
 
         default_seg = str(PROJECT_ROOT / "models" / "segformer_lane") if PROJECT_ROOT else ""
         default_yolo = str(PROJECT_ROOT / "models" / "best.pt") if PROJECT_ROOT else ""
         default_engine = str(PROJECT_ROOT / "models" / "e2e.engine") if PROJECT_ROOT else ""
 
-        self.declare_parameter("lane_topic", "/lane_image/compressed")
-        self.declare_parameter("front_topic", "/front_image/compressed")
-        self.declare_parameter("cmd_topic", "/cmd_vel")
+        self.declare_parameter("lane_topic", LANE_IMAGE_TOPIC)
+        self.declare_parameter("front_topic", FRONT_IMAGE_TOPIC)
+        self.declare_parameter("cmd_topic", CMD_VEL_TOPIC)
         # 디버그 오버레이 publish 토픽. monitor 노드가 이걸 구독해 :8080 에 띄운다.
         # publish_overlay=False 면 합성/그리기 비용을 아예 안 들인다(실주행 최종 런).
         self.declare_parameter("publish_overlay", True)
-        self.declare_parameter("lane_overlay_topic", "/lane_intent/compressed")
-        self.declare_parameter("front_overlay_topic", "/front_det/compressed")
+        self.declare_parameter("lane_overlay_topic", LANE_INTENT_TOPIC)
+        self.declare_parameter("front_overlay_topic", FRONT_DET_TOPIC)
         self.declare_parameter("segformer_ckpt", default_seg)
         self.declare_parameter("yolo_weights", default_yolo)
         self.declare_parameter("engine_path", default_engine)
@@ -253,7 +242,7 @@ class E2EInferNode(Node):
         # steer 라벨은 teleop raw 라 프레임마다 튀어(weaving) 학습이 노이즈를 물려받지만,
         # waypoint 는 cmd_vel 적분 궤적이라 부드럽다. lookahead 점의 곡률로 조향을 유도하면
         # 더 안정적. lookahead_idx 점(로봇 프레임)에서 κ=2y/L², angular≈κ·gain.
-        self.declare_parameter("steer_source", "pursuit")   # "head" | "waypoint"
+        self.declare_parameter("steer_source", "waypoint")  # "head" | "waypoint"
         # waypoint 조향 모드(회피 비교용): pursuit | heading | max_y | mean.
         # 회피가 약하면 거리정규화(pursuit) 대신 heading/max_y 로 바꿔본다.
         self.declare_parameter("steer_mode", "pursuit")
@@ -422,8 +411,8 @@ class E2EInferNode(Node):
         if self.publish_overlay:
             try:
                 lane_ov = draw_intent(lane_comp, wp, color=PRED_COLOR) if wp is not None else lane_comp
-                self.pub_lane_ov.publish(self._encode(lane_ov, msg.header))
-                self.pub_front_ov.publish(self._encode(front_comp, msg.header))
+                self.pub_lane_ov.publish(encode_bgr(lane_ov, msg.header))
+                self.pub_front_ov.publish(encode_bgr(front_comp, msg.header))
             except Exception as exc:
                 self.get_logger().warn(f"overlay publish failed: {exc!r}",
                                        throttle_duration_sec=2.0)
@@ -455,7 +444,7 @@ class E2EInferNode(Node):
         out = self.engine.infer(lane_t, front_t)
 
         steer, throttle = self._read_control(out)
-        wp = out.get("waypoints")
+        wp = out.get(E2E_WAYPOINT_OUTPUT)
         wp = np.asarray(wp).reshape(-1, 2) if wp is not None else None
         return float(steer), float(throttle), lane_comp, front_comp, wp
 
@@ -466,8 +455,11 @@ class E2EInferNode(Node):
         Exporter names outputs steer/throttle/waypoints. If names differ, fall
         back to the two smallest (scalar) outputs as steer, throttle in order.
         """
-        if "steer" in out and "throttle" in out:
-            return np.asarray(out["steer"]).ravel()[0], np.asarray(out["throttle"]).ravel()[0]
+        if E2E_STEER_OUTPUT in out and E2E_THROTTLE_OUTPUT in out:
+            return (
+                np.asarray(out[E2E_STEER_OUTPUT]).ravel()[0],
+                np.asarray(out[E2E_THROTTLE_OUTPUT]).ravel()[0],
+            )
         scalars = sorted(
             (k for k in out if np.asarray(out[k]).size <= 1),
             key=lambda k: np.asarray(out[k]).size,
@@ -538,28 +530,13 @@ class E2EInferNode(Node):
     def _set_target(self, steer: float, throttle: float) -> None:
         """Map model steer -> target Twist using the training control contract.
 
-        From model.py ControlHead docstring (throttle output is intentionally
-        NOT used for cmd_vel; speed is coupled to |steer|, matching teleop):
-          linear.x  = -(0.20 + |steer| * 0.05)   # negative = forward on this rover
-          angular.z = steer * 1.2
-        Stores the target; the watchdog eases the published command toward it.
+        throttle output is intentionally NOT used for cmd_vel; speed is coupled
+        to |steer| via the shared steer_to_cmd_vel (same mapping teleop used to
+        collect the data). Stores the target; the watchdog eases toward it.
         """
-        steer = max(-1.0, min(1.0, steer))
         with self._lock:
-            self._tgt_lin = -(0.20 + abs(steer) * 0.05)
-            self._tgt_ang = steer * 1.2
+            self._tgt_lin, self._tgt_ang = steer_to_cmd_vel(steer)
             self._last_cmd_t = self._now()
-
-    def _encode(self, bgr: np.ndarray, header) -> CompressedImage:
-        """BGR uint8 -> CompressedImage(jpeg). overlay_viz_node 와 동일."""
-        ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ok:
-            raise RuntimeError("cv2.imencode failed")
-        out = CompressedImage()
-        out.header = header
-        out.format = "jpeg"
-        out.data = jpg.tobytes()
-        return out
 
     def _publish_stop(self) -> None:
         # Reset the eased state too, so when driving resumes we don't ease up
@@ -595,8 +572,8 @@ class E2EInferNode(Node):
             self._publish_stop()
             return
         a = self.smooth_alpha
-        self._cur_lin += (tgt_lin - self._cur_lin) * a
-        self._cur_ang += (tgt_ang - self._cur_ang) * a
+        self._cur_lin = approach(self._cur_lin, tgt_lin, a)
+        self._cur_ang = approach(self._cur_ang, tgt_ang, a)
         cmd = Twist()
         cmd.linear.x = float(self._cur_lin)
         cmd.angular.z = float(self._cur_ang)

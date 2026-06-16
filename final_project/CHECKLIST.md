@@ -66,16 +66,16 @@
 
 ### 회전 시 토크 부족으로 로버가 멈춘다
 **원인**:
-차동 모터 구조라 회전 시 토크가 분산되고, 차량 무게까지 더해져 throttle -0.15로는 회전 중 멈추는 현상 발생.
+차동 모터 구조라 회전 시 토크가 분산되고, 차량 무게까지 더해져 낮은 throttle에서는 회전 중 멈추는 현상 발생.
 
 **해결**:
-회전 시 throttle을 -0.25로 높여야 안정적인 코너링 가능. 직선 복귀 시 -0.15로 낮추고 steer 0으로 복귀.
+회전 시 throttle을 -0.25까지 높여야 안정적인 코너링 가능. 직선 복귀 시 -0.20으로 낮추고 steer 0으로 복귀.
 
 ```python
 # throttle-steer coupling (텔레옵 + 모델 출력 역변환 공통)
-base_v   = 0.15
+base_v   = 0.20
 turn_v   = 0.25
-max_omega = 0.8
+max_omega = 1.2
 
 a = abs(turn)  # turn: -1.0 ~ 1.0
 linear_x  = -(base_v + a * (turn_v - base_v))
@@ -84,9 +84,9 @@ angular_z = turn * max_omega
 
 | steer (turn) | linear.x | angular.z |
 |---:|---:|---:|
-| 0.0 | -0.15 | 0.00 |
-| ±0.5 | -0.20 | ±0.40 |
-| ±1.0 | -0.25 | ±0.80 |
+| 0.0 | -0.20 | 0.00 |
+| ±0.8 | -0.24 | ±0.96 |
+| ±1.0 | -0.25 | ±1.20 |
 
 ---
 
@@ -118,17 +118,17 @@ angular_z = turn * max_omega
 1D steering level + throttle coupling 방식 (rover_teleop teleop_node).
 
 ```
-기본 전진:  linear.x = -0.15, angular.z = 0.0
-좌우 5단계 조향 (turn_level: -5 ~ +5, a/d 키)
+기본 전진:  linear.x = -0.20, angular.z = 0.0
+좌우 2단계 조향 (turn_level: -2 ~ +2, a/d 키)
 조향 강도에 비례해서 throttle도 자동으로 -0.25까지 증가
 space = 정지
 ```
 
 ```python
-turn = turn_level / 5.0          # -1.0 ~ 1.0
-a    = abs(turn)
-linear_x  = -(0.15 + a * 0.10)  # -0.15 ~ -0.25
-angular_z = turn * 0.8           # -0.8 ~ +0.8
+turn_frac = (0.0, 0.8, 1.0)[abs(turn_level)]
+sign = 1.0 if turn_level >= 0 else -1.0
+linear_x  = -(0.20 + turn_frac * 0.05)  # -0.20 ~ -0.25
+angular_z = sign * turn_frac * 1.2      # -1.2 ~ +1.2
 
 # smoothing (부드러운 cmd_vel 발행)
 linear_x  = approach(current_v, linear_x,  alpha)
@@ -152,7 +152,7 @@ angular_z = approach(current_w, angular_z, alpha)
 - Colab에서 `rosbags` 라이브러리로 직접 파싱 가능 (ROS2 설치 불필요)
 
 ```bash
-ros2 bag record /bev_image/compressed /front_image/compressed /cmd_vel /steer_level
+ros2 bag record /lane_image/compressed /front_image/compressed /cmd_vel /steer_level
 ```
 
 ---
@@ -161,12 +161,10 @@ ros2 bag record /bev_image/compressed /front_image/compressed /cmd_vel /steer_le
 
 ### 카메라/추론/제어 노드가 서로 블로킹된다
 **해결**:
-- ROS2 `MultiThreadedExecutor` + `ReentrantCallbackGroup` 사용
-- 스레드 분리: 이미지 수신 / 모델 추론 / 제어 명령 발행
-
-```python
-executor = MultiThreadedExecutor(num_threads=3)
-```
+- 카메라 노드는 lane/front reader thread를 분리하고, timer가 최신 프레임만 JPEG publish.
+- 추론은 SegFormer+YOLO+E2E를 한 프로세스에 묶어 JPEG 토픽 hop을 줄이고, watchdog timer가
+  `cmd_timeout_s` 초과 시 hard stop을 낸다.
+- 모니터는 별도 MJPEG 노드라 제어 경로와 분리된다.
 
 ---
 
@@ -217,8 +215,9 @@ trtexec --onnx=model.onnx --saveEngine=model.engine --fp16
 
 **해결 (효과 큰 순서)**:
 
-1. **SegFormer 를 TensorRT 로 변환** (가장 효과 큼, fp16 2~4배). 단 E2E 처럼 공짜 아님:
+1. **디버그 비용 제거** — 최종 주행은 `monitor:=false publish_overlay:=false`.
+2. **YOLO 격프레임 실행** — 차가 자주 안 나오니 2~3프레임에 1번만, 나머지는 직전 bbox 재사용.
+3. **SegFormer 를 TensorRT 로 변환** (가장 효과 큼, fp16 2~4배). 단 E2E 처럼 공짜 아님:
    onnx export(Transformer 라 op 호환 확인 필요) + 전처리(`SegformerImageProcessor`)를
    numpy 로 재현 + 추론 노드에 SegFormer 용 TRTEngine 추가. 반나절 작업 + fp16 세그 품질 검증.
-2. **YOLO 격프레임 실행** — 차가 자주 안 나오니 2~3프레임에 1번만, 나머지는 직전 bbox 재사용.
-3. 입력 해상도 ↓(224→160) 또는 더 작은 백본 — 재학습 필요, 최후 수단.
+4. 입력 해상도 ↓(224→160) 또는 더 작은 백본 — 재학습 필요, 최후 수단.

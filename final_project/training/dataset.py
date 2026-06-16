@@ -2,21 +2,12 @@
 
 H5 는 raw lane/front + seg/det 를 따로 저장하고(추출 시점에 합성하지 않음),
 여기서 매 샘플 오버레이를 합성한다. 그래야 재추출 없이 합성 계약을 튜닝할 수
-있다(PHASE2.md 4단계 명세). 합성 픽셀은 추론 노드(rover_lane)와 **동일**해야
-하므로 아래 두 함수가 학습/추론 공용 계약이다:
+있다(PHASE2.md 4단계 명세).
 
-  composite_lane(lane_bgr, seg)   : raw lane(BGR) + seg 3채널 alpha-blend
-  composite_front(front_bgr, det) : raw front(BGR) + car bbox 사각형
-
-합성 규칙은 extract_labels.save_debug / visualize_labels.overlay_seg 와 동일:
-  - seg ch0=left-solid→red(0,0,255), ch1=right-solid→green, ch2=center-dashed→blue
-  - blend = base*0.4 + color*0.6 (마스크 픽셀만)
-  - bbox = det[4]>0 일 때만 초록 사각형 (디버그 텍스트/waypoint 는 그리지 않음)
-
-색공간/정규화:
-  H5 의 lane/front 는 BGR(uint8). 합성도 BGR 로 한 뒤, 텐서화 직전에 RGB 로
-  변환하고 ImageNet mean/std 로 정규화한다. ResNet18 ImageNet pretrained 가
-  RGB 기준이므로. 추론 노드도 반드시 BGR→RGB→ImageNet 동일 순서를 써야 한다.
+합성·텐서화 함수(composite_lane/front, to_input_tensor)는 학습/추론/프리뷰가 픽셀
+단위로 동일해야 하므로 **data_pipeline.preprocess** 한 소스에 두고 import 한다(여기서
+재구현하지 않는다). 색공간/정규화: BGR uint8 합성 → BGR→RGB→ImageNet mean/std
+(ResNet18 ImageNet pretrained 가 RGB 기준). 자세한 계약은 preprocess.py 참고.
 """
 
 from __future__ import annotations
@@ -29,22 +20,19 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-# 합성 계약 상수는 추출 스크립트와 한 소스를 공유한다.
+# 합성/텐서 계약은 추출·추론과 한 소스(data_pipeline.preprocess)를 공유한다 — 픽셀 단위
+# 동일성이 깨지면 추론이 오작동하므로 여기서 재구현하지 않고 import 한다.
+# final_project/ 와 data_pipeline/ 을 모두 path 에 둬, 패키지/탑레벨 양쪽에서 동작.
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data_pipeline"))
-from extract_labels import SEG_N_CLASSES  # noqa: E402
-
-# seg 채널 → BGR 색 (extract_labels.save_debug 와 동일)
-#   ch0=left-solid red, ch1=right-solid green, ch2=center-dashed blue
-SEG_COLORS_BGR = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
-SEG_ALPHA = 0.6   # color 비중 (base 0.4)
-
-BBOX_COLOR_BGR = (0, 255, 0)
-BBOX_THICK = 2
-
-# ImageNet 정규화 (RGB 기준)
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_FP = Path(__file__).resolve().parents[1]
+for _p in (_FP, _FP / "data_pipeline"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+from preprocess import (  # noqa: E402
+    composite_lane,
+    composite_front,
+    to_input_tensor,
+)
 
 # steer 정규화 스케일 = teleop MAX_OMEGA. extract_labels 는 angular.z(∈[-1.2,1.2])를
 # raw 로 저장하는데 ControlHead 끝이 Tanh(∈[-1,1]) 라, raw 를 그대로 타깃으로 쓰면
@@ -52,37 +40,6 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # steer/STEER_SCALE 로 [-1,1] 에 맞춘 뒤 학습한다(추론 노드는 angular.z=steer*1.2 로
 # 역변환하므로 일관). 옛 체크포인트와는 타깃 스케일이 달라 resume 불가(재학습 필요).
 STEER_SCALE = 1.2
-
-
-def composite_lane(lane_bgr: np.ndarray, seg: np.ndarray) -> np.ndarray:
-    """raw lane(BGR uint8) 에 seg 3채널을 색으로 alpha-blend. 반환 BGR uint8."""
-    out = lane_bgr.copy()
-    for c in range(SEG_N_CLASSES):
-        m = seg[c] > 0
-        if not m.any():
-            continue
-        color = np.array(SEG_COLORS_BGR[c], dtype=np.float32)
-        out[m] = (out[m] * (1.0 - SEG_ALPHA) + color * SEG_ALPHA).astype(np.uint8)
-    return out
-
-
-def composite_front(front_bgr: np.ndarray, det: np.ndarray) -> np.ndarray:
-    """raw front(BGR uint8) 에 car bbox 사각형. det=[x,y,w,h,conf], conf<=0 이면 무변경."""
-    out = front_bgr.copy()
-    if det[4] > 0:
-        x, y, w, h, _ = det
-        cv2.rectangle(out, (int(x), int(y)), (int(x + w), int(y + h)),
-                      BBOX_COLOR_BGR, BBOX_THICK)
-    return out
-
-
-def to_input_tensor(img_bgr: np.ndarray) -> torch.Tensor:
-    """합성된 BGR uint8 (H,W,3) → RGB ImageNet-정규화 텐서 (3,H,W) float32.
-
-    추론 노드는 이 함수와 픽셀 단위로 동일한 변환을 써야 한다."""
-    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    rgb = (rgb - IMAGENET_MEAN) / IMAGENET_STD
-    return torch.from_numpy(rgb.transpose(2, 0, 1).copy())
 
 
 def hflip_sample(lane, front, seg, det, steer, throttle, wp):

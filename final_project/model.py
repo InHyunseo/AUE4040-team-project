@@ -4,15 +4,17 @@
   lane_img   (B, 3, 224, 224)  SegFormer 차선 마스크 오버레이된 Lane 이미지
   front_img  (B, 3, 224, 224)  YOLO 차량 bbox 오버레이된 Front 이미지
 출력:
-  steer      (B,)      [-1, 1]   → rover_control에서 angular.z로 변환  (메인)
-  throttle   (B,)      [-1, 1]   → rover_control에서 linear.x로 변환   (메인)
-  waypoints  (B, 5, 2)  meters   로봇 프레임 미래 궤적 (x_forward, y_left)  (보조)
+  steer      (B,)      [-1, 1]   → ControlHead. 학습 신호이자 head-steer 폴백
+  throttle   (B,)      [-1, 1]   → 속도는 |steer| 커플링이라 cmd_vel엔 미사용
+  waypoints  (B, 5, 2)  meters   로봇 프레임 미래 궤적 (x_forward, y_left)
 
 구조: LaneEncoder/FrontEncoder(ResNet18×2) → concat → ControlHead + WaypointHead.
-waypoint는 보조 출력(multi-task head): GT는 cmd_vel 적분 궤적(extract_labels.waypoint_gt)
-으로, 공유 feature를 멀티스텝 의도 쪽으로 regularize해 steer/throttle 일반화를 돕는다.
-추론 시에는 사용 안 함(디버깅/시연 때만 시각화). SegFormer/YOLO는 전처리 단계에서
-freeze, ResNet18·헤드는 처음부터 학습.
+**확정 주행 경로는 waypoint → pure pursuit → steer** (rover_lane, steer_source=waypoint 기본값):
+raw steer 헤드는 학습 정확도 하한에 걸려, 같은 backbone 에서 더 부드러운 waypoint 회귀를
+pure pursuit 로 추종하는 쪽이 안정적이었다. steer/throttle 헤드는 멀티태스크로 함께 학습돼
+backbone 을 제어 신호 쪽으로도 붙잡아 두는 보조 역할(+ head-steer 폴백)을 한다.
+waypoint GT는 cmd_vel 적분 궤적(extract_labels.waypoint_gt). SegFormer/YOLO는 전처리
+단계에서 freeze, ResNet18·헤드는 처음부터 학습.
 """
 
 import torch
@@ -93,15 +95,17 @@ class FrontEncoder(nn.Module):
 
 class ControlHead(nn.Module):
     """
-    concat feature → steer, throttle  (메인 출력)
+    concat feature → steer, throttle  (학습 신호 + head-steer 폴백)
 
     입력: concat(lane_feat, front_feat) = 256 + 256 = 512
     출력: steer (B,), throttle (B,)  ∈ [-1, 1]
+    (확정 조향은 WaypointHead+pure pursuit. 이 헤드는 멀티태스크 학습 신호이자
+     steer_source=head 폴백.)
 
     정규화: BatchNorm1d (FC 레이어 간 internal covariate shift 방지)
     출력 활성화: Tanh
     - steer/throttle 범위를 [-1, 1]로 강제
-    - rover_control에서 실제 값으로 역변환:
+    - rover_lane에서 실제 값으로 역변환(rover_common.control.steer_to_cmd_vel):
         linear.x  = -(0.20 + abs(steer) * 0.05)  # -0.20 ~ -0.25
         angular.z = steer * 1.2                   # -1.2 ~ +1.2
 
@@ -138,7 +142,7 @@ class ControlHead(nn.Module):
 
 class WaypointHead(nn.Module):
     """
-    concat feature → waypoints (5점)  (보조 출력)
+    concat feature → waypoints (5점)  (확정 주행의 조향 소스)
 
     입력: concat(lane_feat, front_feat) = 512  (ControlHead와 동일 feature 공유)
     출력: waypoints (B, 5, 2)  meters, 로봇 프레임 (x_forward, y_left)
@@ -147,8 +151,9 @@ class WaypointHead(nn.Module):
     - 최종 레이어 Linear(64, WP_N*2=10) → (B, 5, 2)로 reshape
     - Tanh 없음 (waypoint는 미터 단위 unbounded 회귀값)
 
-    역할: steer/throttle과 같은 backbone feature를 멀티스텝 의도 표현 쪽으로
-          regularize. GT는 cmd_vel 적분 궤적. 추론 시 사용 안 함.
+    역할: 확정 추론에서 이 출력에 pure pursuit 를 걸어 steer 를 만든다(rover_lane).
+          GT는 cmd_vel 적분 궤적. 같은 backbone 을 멀티스텝 의도 쪽으로 잡아줘
+          raw steer 헤드보다 부드러운 조향을 낸다.
 
     학습: pretrained 없음, 처음부터 학습
     """

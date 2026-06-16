@@ -4,7 +4,7 @@
 
 train_e2e.py 가 저장한 {"model": state_dict, ...} 또는 순수 state_dict 를 모두
 받는다. 입력은 lane/front 두 개 (1,3,224,224), 출력은 steer/throttle/waypoints.
-추론(실주행)에서 waypoints 출력은 시각화 전용 — engine 변환 후 무시.
+추론(실주행)에서 waypoints 출력은 시각화와 선택적 waypoint 기반 조향에 사용된다.
 
 이후 Jetson 에서만:
   /usr/src/tensorrt/bin/trtexec --onnx=e2e.onnx --fp16 --saveEngine=e2e.engine

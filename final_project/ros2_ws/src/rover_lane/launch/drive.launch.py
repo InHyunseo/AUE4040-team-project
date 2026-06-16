@@ -20,6 +20,13 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from rover_common.constants import (
+    FRONT_DET_TOPIC,
+    FRONT_IMAGE_TOPIC,
+    LANE_IMAGE_TOPIC,
+    LANE_INTENT_TOPIC,
+)
+
 
 def generate_launch_description() -> LaunchDescription:
     fps = LaunchConfiguration("fps")
@@ -35,6 +42,7 @@ def generate_launch_description() -> LaunchDescription:
     watchdog_hz = LaunchConfiguration("watchdog_hz")
     cmd_timeout_s = LaunchConfiguration("cmd_timeout_s")
     smooth_alpha = LaunchConfiguration("smooth_alpha")
+    publish_overlay = LaunchConfiguration("publish_overlay")
     steer_source = LaunchConfiguration("steer_source")
     steer_mode = LaunchConfiguration("steer_mode")
     lookahead_idx = LaunchConfiguration("lookahead_idx")
@@ -70,6 +78,9 @@ def generate_launch_description() -> LaunchDescription:
                               description="steer low-pass per watchdog tick "
                                           "(matches teleop SMOOTH_ALPHA; 0=off, "
                                           "lower=smoother/laggier, higher=snappier)"),
+        DeclareLaunchArgument("publish_overlay", default_value="true",
+                              description="publish /lane_intent and /front_det debug JPEGs "
+                                          "(set false for final runs)"),
         # 조향 소스/모드 (회피 비교용). head=ControlHead steer 직접,
         # waypoint=waypoint 추종(steer_mode: pursuit|heading|max_y|mean).
         DeclareLaunchArgument("steer_source", default_value="waypoint",
@@ -100,10 +111,10 @@ def generate_launch_description() -> LaunchDescription:
                  "host": monitor_host,
                  "port": monitor_port,
                  "streams": [
-                     "lane:/lane_image/compressed",
-                     "front:/front_image/compressed",
-                     "lane_intent:/lane_intent/compressed",
-                     "front_det:/front_det/compressed",
+                     f"lane:{LANE_IMAGE_TOPIC}",
+                     f"front:{FRONT_IMAGE_TOPIC}",
+                     f"lane_intent:{LANE_INTENT_TOPIC}",
+                     f"front_det:{FRONT_DET_TOPIC}",
                  ],
              }]),
 
@@ -124,6 +135,7 @@ def generate_launch_description() -> LaunchDescription:
                  "watchdog_hz": watchdog_hz,
                  "cmd_timeout_s": cmd_timeout_s,
                  "smooth_alpha": smooth_alpha,
+                 "publish_overlay": publish_overlay,
                  "steer_source": steer_source,
                  "steer_mode": steer_mode,
                  "lookahead_idx": lookahead_idx,

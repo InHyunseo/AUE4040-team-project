@@ -1,7 +1,6 @@
 """Dual CSI camera publisher.
 
-Publishes two raw monocular streams (jetcam wrapper at
-/home/ircv16/team/calibration/camera):
+Publishes two raw monocular streams (jetcam wrapper from repo `calibration/camera`):
   /lane_image/compressed   sensor_msgs/CompressedImage  — sensor 0 (lane-seg head)
   /front_image/compressed  sensor_msgs/CompressedImage  — sensor 1 (object-detection head)
 
@@ -12,30 +11,21 @@ with no color conversion in the hot path.
 """
 from __future__ import annotations
 
-import sys
 import threading
 import time
-from pathlib import Path
 
-import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Header
 
-# 이미지 송신 QoS: depth=1 로 송신측이 옛 프레임을 들고 있지 않게 한다(지연 누적 방지).
-# reliability 는 RELIABLE 유지 — 학습 bag을 저장하는 bag_recorder(RELIABLE sub)와
-# 매칭되려면 pub 이 RELIABLE 이어야 한다(best-effort pub ↔ reliable sub 는 매칭 실패).
-# RELIABLE pub ↔ BEST_EFFORT 소비자(monitor/overlay/추론) sub 도 정상 매칭된다.
-# depth=1 이어도 RELIABLE 재전송/flow-control 은 별개라 recorder 완결성은 유지된다.
-IMAGE_PUB_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.RELIABLE,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=1,
-)
+from rover_common.constants import FRONT_IMAGE_TOPIC, LANE_IMAGE_TOPIC
+from rover_common.image_io import encode_bgr
+from rover_common.paths import ensure_repo_on_path
+from rover_common.qos import IMAGE_PUB_QOS
 
-sys.path.insert(0, "/home/ircv16/team")
+ensure_repo_on_path(__file__)
 from calibration.camera import Camera  # noqa: E402
 
 
@@ -74,8 +64,8 @@ class CameraNode(Node):
         for cam, key in [(self.cam_lane, "lane"), (self.cam_front, "front")]:
             threading.Thread(target=self._reader, args=(cam, key), daemon=True).start()
 
-        self.pub_lane  = self.create_publisher(CompressedImage, "/lane_image/compressed",  IMAGE_PUB_QOS)
-        self.pub_front = self.create_publisher(CompressedImage, "/front_image/compressed", IMAGE_PUB_QOS)
+        self.pub_lane  = self.create_publisher(CompressedImage, LANE_IMAGE_TOPIC,  IMAGE_PUB_QOS)
+        self.pub_front = self.create_publisher(CompressedImage, FRONT_IMAGE_TOPIC, IMAGE_PUB_QOS)
         self.timer = self.create_timer(1.0 / fps, self._tick)
         self._tick_i = 0
 
@@ -92,18 +82,6 @@ class CameraNode(Node):
             except Exception:
                 time.sleep(0.01)
 
-    def _encode(self, bgr: np.ndarray, stamp) -> CompressedImage:
-        ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_q])
-        if not ok:
-            raise RuntimeError("cv2.imencode failed")
-        msg = CompressedImage()
-        # 캡처 시각을 그대로 싣는다(publish/인코딩 시각이 아니라). 추출 단계가
-        # 이 stamp 로 lane↔front 를 매칭하면 두 카메라 정합이 캡처 기준이 된다.
-        msg.header.stamp = stamp.to_msg()
-        msg.format = "jpeg"
-        msg.data = jpg.tobytes()
-        return msg
-
     def _tick(self) -> None:
         self._tick_i += 1
         for key, pub, frame_id in [("lane",  self.pub_lane,  "lane_camera"),
@@ -112,9 +90,10 @@ class CameraNode(Node):
             if latest is None:
                 continue
             frame, stamp = latest
-            msg = self._encode(frame, stamp)
-            msg.header.frame_id = frame_id
-            pub.publish(msg)
+            # 캡처 시각을 그대로 싣는다(publish/인코딩 시각이 아니라). 추출 단계가
+            # 이 stamp 로 lane↔front 를 매칭하면 두 카메라 정합이 캡처 기준이 된다.
+            header = Header(stamp=stamp.to_msg(), frame_id=frame_id)
+            pub.publish(encode_bgr(frame, header, quality=self.jpeg_q))
         if self._tick_i % 30 == 0:
             self.get_logger().info(
                 f"published lane={self._latest['lane'] is not None} "

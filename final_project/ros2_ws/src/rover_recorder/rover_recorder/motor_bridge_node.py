@@ -7,14 +7,15 @@ cmd_vel convention (matches teleop_node + extract_labels.py):
 """
 from __future__ import annotations
 
-import sys
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
-sys.path.insert(0, "/home/ircv16/team")
+from rover_common.constants import CMD_VEL_TOPIC, MAX_OMEGA
+from rover_common.paths import ensure_repo_on_path
+
 try:
+    ensure_repo_on_path(__file__)
     from control.base_ctrl import BaseController
 except Exception as e:  # pragma: no cover — import-time error reported at runtime
     BaseController = None
@@ -23,7 +24,6 @@ else:
     _IMPORT_ERR = None
 
 
-MAX_OMEGA = 1.2
 # Steering shape (see mix()): STEER_GAIN scales the L/R gap. At 1.0 the inside
 # wheel reaches exactly 0 at full lock (level 2 pivots in place), while level 1
 # keeps some inside-wheel drive. MIN_INNER floors the inside wheel; set to 0 so
@@ -88,7 +88,7 @@ class MotorBridgeNode(Node):
             self.base = BaseController(uart, baud)
             self.get_logger().info(f"motor ready on {uart}@{baud}")
 
-        self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 10)
+        self.create_subscription(Twist, CMD_VEL_TOPIC, self._on_cmd, 10)
         self._dbg = 0
 
     def _on_cmd(self, msg: Twist) -> None:
